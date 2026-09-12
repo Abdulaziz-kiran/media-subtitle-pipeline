@@ -1,0 +1,19 @@
+{
+  "policy": {
+    "authorized": true,
+    "requested_by": "user",
+    "instruction": "Kullanıcının açık içerik filtreleme talimatını buraya yaz.",
+    "source_reference": "Kullanıcı talimatının tarihini veya görev kaydını buraya yaz."
+  },
+  "cuts": [
+    {
+      "start": 0.0,
+      "end": 1.0,
+      "category": "kullanıcı-tanımlı-kategori",
+      "cut_reason": "Bu aralığın kullanıcı talimatıyla neden çıkarıldığını yaz.",
+      "evidence": "Görüntü, ses ve hikâye bağlamında gerçekten incelenen bulguyu somut biçimde yaz.",
+      "reviewed_by": "inceleyen-ajan-veya-insan",
+      "context_note": "Kesim sonrasında izleyiciye gösterilecek gerekli hikâye bağlamını yaz veya boş bırak."
+    }
+  ]
+}

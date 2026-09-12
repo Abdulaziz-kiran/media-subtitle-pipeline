@@ -1,0 +1,16 @@
+{
+  "profile_name": "turkish-personal",
+  "font": "Source Sans 3",
+  "max_cps": 16,
+  "max_cpl": 40,
+  "max_lines": 2,
+  "min_duration_ms": 1300,
+  "max_duration_ms": 7000,
+  "short_max_ms": 1800,
+  "max_extension_ms": 500,
+  "gap_ms": 80,
+  "translate_signs": true,
+  "translate_songs": true,
+  "batch_size": 20,
+  "scene_gap_ms": 3000
+}

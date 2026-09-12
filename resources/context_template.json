@@ -1,0 +1,24 @@
+{
+  "context_prepared": false,
+  "title": "",
+  "media_type": "",
+  "summary": "",
+  "glossary": {},
+  "relationships": [],
+  "voices": {},
+  "uncertainties": [],
+  "context_sources": [],
+  "context_checks": {
+    "glossary": "reviewed_none_found",
+    "relationships": "reviewed_none_found",
+    "voices": "reviewed_none_found",
+    "uncertainties": "reviewed_none_found",
+    "songs": "reviewed_none_found"
+  },
+  "source_language": "en",
+  "target_language": "tr",
+  "original_audio_language": "",
+  "original_audio_status": "unknown",
+  "original_audio_evidence": "",
+  "songs": []
+}

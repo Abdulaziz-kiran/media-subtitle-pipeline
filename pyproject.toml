@@ -1,0 +1,14 @@
+[project]
+name = "shared-media-subtitle-pipeline"
+version = "2.3.1"
+description = "Deterministic media subtitle translation, context orchestration, and muxing pipeline"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pysubs2==1.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]

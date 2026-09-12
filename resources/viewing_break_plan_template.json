@@ -1,0 +1,17 @@
+{
+  "beta_feature": "viewing_breaks",
+  "beta_version": "viewing-breaks-beta.1",
+  "source_sha256": "",
+  "review_status": "needs_story_review",
+  "reviewed_by": "",
+  "review_summary": "",
+  "breaks": [
+    {
+      "requested_time": 0.0,
+      "applied_time": 0.0,
+      "story_safe": false,
+      "evidence": "",
+      "next_title": "İzleme Bölümü 2"
+    }
+  ]
+}
