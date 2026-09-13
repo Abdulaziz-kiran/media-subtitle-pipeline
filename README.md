@@ -5,7 +5,10 @@
 [![Tested with Pytest](https://img.shields.io/badge/Tests-133%20passed-brightgreen.svg)]()
 [![Engine Version](https://img.shields.io/badge/Version-2.3.1-informational.svg)]()
 
-A deterministic, production-grade media subtitle translation, context orchestration, and container muxing pipeline. Engineered specifically for pairing with autonomous AI coding agents (Antigravity / Codex) and multi-agent workflows.
+An AI-assisted personal workflow for subtitle translation, context management, validation, and media delivery. Engineered specifically for pairing with autonomous AI coding agents (Antigravity / Codex) and multi-agent workflows.
+
+> **Project & Development Note**  
+> This project is a personal AI-assisted workflow tool designed and iterated by **Abdulaziz Kiran**. The personal contribution focused on defining the real-world media problem, structuring the end-to-end workflow, specifying requirements and format edge cases, establishing validation criteria, and iteratively testing, identifying failures, and guiding fixes across iterations. Implementation and debugging were carried out with substantial assistance from AI coding agents. While automated tests verify defined behavior under tested constraints, this project represents an experimental personal workflow rather than a production enterprise deployment.
 
 ---
 
@@ -112,5 +115,5 @@ uv run python3 scripts/run_pipeline.py finalize --job jobs/episode-01
 
 ## 📄 License & Attribution
 
-Authored by **Abdulaziz Kiran**. Designed for integration with Antigravity / Codex AI agent workspaces.
+Project design, requirements, and specifications by **Abdulaziz Kiran** (AI-assisted implementation). Designed for integration with Antigravity / Codex AI agent workspaces.
 Bundled OpenType fonts (`Source Sans 3`) are distributed under the SIL Open Font License (OFL).
