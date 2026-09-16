@@ -90,6 +90,11 @@ Orkestrasyon belgesi kasıtlı olarak platforma bağlı ajan API'si çağırmıy
 
 Bu zaten doğru davranış ve belgeli. Not olarak burada: `resume-from-archive` ile açılan yeni işte eski review'ı geçerli saymadığından, devam eden iş için tekrar inceleme gerekir.
 
+### F. `provenance.json` üretimi ve `archive_delivery.py` entegrasyonu
+
+`SKILL.md` satır 41-47'de tanımlanan bağımsız `provenance.json` (Çeviri Üretim Pasaportu ve Geriye Dönük Analiz Kaydı), mevcut `scripts/archive_delivery.py` tarafından bağımsız bir dosya olarak henüz otomatik üretilmemekte veya zorunlu tutulmamaktadır. İlgili telemetri ve doğrulama verileri şu an `technical_report.json`, `worker_receipts/*.json`, `orchestration.json` ve `token_usage.json` içinde dağıtık bulunmaktadır. Bu durum 2.4.1 revizyonu öncesinden gelen tarihsel bir dokümantasyon/motor tutarsızlığıdır; bir sonraki sürümde ya deterministik bir `generate_provenance` adımı eklenmeli ya da doküman makbuz mimarisine uyarlanmalıdır.
+
+
 ---
 
 ## Motor Sürümü
