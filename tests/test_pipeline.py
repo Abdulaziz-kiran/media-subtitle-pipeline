@@ -1,4 +1,5 @@
 import copy
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -13,6 +14,8 @@ import run_pipeline as runner
 import content_filter_pipeline as cuts
 import extract_subtitles as extract
 import ab_compare
+import usage_ledger
+import analyze_audit
 from archive_delivery import archive_delivery
 
 
@@ -33,6 +36,10 @@ class PipelineTests(unittest.TestCase):
     def build(self,data=None):return core.build_candidate(self.src,data or self.data,self.profile)
     def job(self):
         job=self.root/'job';runner.prepare(self.src,job,context_path=self.context_path)
+        # Most pre-existing pipeline fixtures exercise legacy bundle behavior.
+        # Strict orchestration is covered below with its own new-job fixture.
+        meta=core.read_json(job/'job.json');meta.pop('orchestration_required');core.write_json(job/'job.json',meta)
+        (job/'orchestration.json').unlink()
         core.write_json(job/'translations/batch-0001.json',self.data)
         return job
     def review(self,job):
@@ -113,7 +120,9 @@ class PipelineTests(unittest.TestCase):
         job=self.job();runner.build(job);r=self.review(job);r['lines'].pop();core.write_json(job/'review.json',r)
         with self.assertRaises(ValueError):runner.finalize(job,self.root/'final.ass')
     def test_complete_delivery(self):
-        job=self.job();runner.build(job);self.review(job);(job/'content_filter').mkdir();(job/'viewing_breaks').mkdir()
+        job=self.job();runner.build(job);self.review(job);(job/'content_filter').mkdir();(job/'viewing_breaks').mkdir(exist_ok=True)
+        (job/'artifacts'/'evaluation').mkdir(parents=True)
+        (job/'artifacts'/'evaluation'/'quality-note.txt').write_text('Authored evaluation note for archive coverage.')
         core.write_json(job/'content_filter/cut-demo.json',{'requested_seconds':[1,2],'applied_seconds':[0,3],'evidence':'Authored fixture cut evidence','context_note':'Authored context note'})
         core.write_json(job/'viewing_breaks/chapters-demo.json',{'status':'beta_chapters_need_playback_review','breaks':[2]})
         out=self.root/'final.ass'
@@ -126,8 +135,10 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue((Path(result['archive'])/'final.ass').is_file())
         self.assertTrue((Path(result['archive'])/'content_filter/cut-demo.json').is_file())
         self.assertTrue((Path(result['archive'])/'viewing_breaks/chapters-demo.json').is_file())
+        self.assertTrue((Path(result['archive'])/'token_usage.json').is_file())
+        self.assertTrue((Path(result['archive'])/'artifacts/evaluation/quality-note.txt').is_file())
         self.assertEqual(core.read_json(out.with_suffix('.ass.qa.json'))['content_filter_evidence'][0]['file'],'cut-demo.json')
-        self.assertEqual(core.read_json(out.with_suffix('.ass.qa.json'))['viewing_break_evidence'][0]['file'],'chapters-demo.json')
+        self.assertIn('chapters-demo.json',[row['file'] for row in core.read_json(out.with_suffix('.ass.qa.json'))['viewing_break_evidence']])
         self.assertEqual(runner.status(Path(result['archive']))['missing_batches'],[])
         self.assertTrue((Path(result['archive'])/'translations/batch-0001.json').is_file())
         with self.assertRaisesRegex(ValueError,'read-only'):runner.build(Path(result['archive']))
@@ -135,12 +146,46 @@ class PipelineTests(unittest.TestCase):
         resumed=self.root/'resumed';runner.resume_from_archive(Path(result['archive']),resumed)
         self.assertFalse((resumed/'candidate.ass').exists());self.assertTrue((resumed/'translations/batch-0001.json').exists())
         self.assertTrue((resumed/'viewing_breaks/chapters-demo.json').is_file())
+        self.assertTrue((resumed/'token_usage.json').is_file())
+        self.assertTrue((resumed/'artifacts/evaluation/quality-note.txt').is_file())
         runner.build(resumed)
         repeated=archive_delivery(job,out,out.with_suffix('.ass.qa.json'),self.root/'archive')
         self.assertEqual(repeated['bundle'],result['archive'])
         archived_final=Path(result['archive'])/'final.ass';archived_final.write_text(archived_final.read_text()+'tamper')
         with self.assertRaisesRegex(ValueError,'integrity violation'):
             archive_delivery(job,out,out.with_suffix('.ass.qa.json'),self.root/'archive')
+    def test_token_ledger_is_honest_and_receipt_is_bounded(self):
+        job=self.job()
+        self.assertEqual(usage_ledger.summarize_usage_ledger(core.read_json(job/'token_usage.json'))['measurement_status'],'not_recorded')
+        ledger={'schema_version':1,'runs':[{'role':'translator','measurement_status':'measured','source':'Codex run usage panel','model':'gpt-fixture',
+                 'input_tokens':120,'output_tokens':80,'cached_input_tokens':20,'reason':'Exact usage copied from the completed worker run.'},
+                {'role':'reviewer','measurement_status':'unavailable','source':'No worker telemetry','model':'',
+                 'input_tokens':None,'output_tokens':None,'cached_input_tokens':None,'reason':'The worker interface did not expose a token count.'}]}
+        with self.assertRaisesRegex(ValueError,'Unavailable token usage'):
+            usage_ledger.validate_usage_ledger({**ledger,'runs':[ledger['runs'][0],{**ledger['runs'][1],'input_tokens':1}]})
+        core.write_json(job/'token_usage.json',ledger)
+        receipt=core.read_json(runner.create_receipt(job,'translation')['receipt_path'])
+        self.assertEqual(receipt['token_usage']['measurement_status'],'partial')
+        self.assertIsNone(receipt['token_usage']['input_tokens'])
+        self.assertLess(len(json.dumps(receipt,ensure_ascii=False)),2000)
+    def test_cross_job_audit_refuses_partial_token_totals(self):
+        job=self.job();runner.build(job)
+        core.write_json(job/'token_usage.json',{'schema_version':1,'runs':[{'role':'translator','measurement_status':'measured',
+            'source':'Fixture telemetry','model':'fixture-model','input_tokens':17,'output_tokens':11,'cached_input_tokens':3,'reason':'Exact fixture telemetry was recorded for this completed run.'}]})
+        measured=analyze_audit.analyze_reports([job/'technical_report.json'])['token_usage']
+        self.assertEqual(measured['input_tokens'],17);self.assertEqual(measured['output_tokens'],11)
+        ledger=core.read_json(job/'token_usage.json');ledger['runs'].append({'role':'reviewer','measurement_status':'unavailable',
+            'source':'Fixture telemetry unavailable','model':'','input_tokens':None,'output_tokens':None,'cached_input_tokens':None,'reason':'No token measurement was exposed by the fixture interface.'})
+        core.write_json(job/'token_usage.json',ledger)
+        partial=analyze_audit.analyze_reports([job/'technical_report.json'])['token_usage']
+        self.assertEqual(partial['jobs_needing_usage_record'],1);self.assertIsNone(partial['input_tokens'])
+    def test_record_token_usage_cli_replaces_blank_ledger(self):
+        job=self.job();incoming=self.root/'measured-usage.json'
+        core.write_json(incoming,{'schema_version':1,'runs':[{'role':'translator','measurement_status':'measured',
+            'source':'Fixture usage export','model':'fixture-model','input_tokens':10,'output_tokens':6,'cached_input_tokens':0,'reason':'Exact fixture export was copied after the completed worker run.'}]})
+        with patch.object(sys,'argv',['run_pipeline.py','record-token-usage','--job',str(job),'--input',str(incoming)]), patch('sys.stdout',new_callable=io.StringIO):
+            runner.main()
+        self.assertEqual(core.read_json(job/'token_usage.json'),core.read_json(incoming))
     def test_english_job_requires_learning_report(self):
         job=self.job();runner.build(job);self.review(job);(job/'learning_report.json').unlink()
         with self.assertRaisesRegex(ValueError,'learning_report'):
@@ -193,6 +238,211 @@ class PipelineTests(unittest.TestCase):
         weak=core.read_json(self.context_path);weak['summary']='x';weak['context_sources']=[{'kind':'subtitle','reference':'x','finding':'x'}]
         core.write_json(self.root/'weak.json',weak)
         with self.assertRaises(ValueError):runner.prepare(self.src,self.root/'weak-job',context_path=self.root/'weak.json')
+    def test_import_plain_translations_binds_exact_ids_without_source_text_matching(self):
+        source=self.root/'identity-only.ass';subs=pysubs2.SSAFile()
+        source_lines=['Ow!','Who are you? Ow!',"I'm sorry.","I'm sorry. I wanted to at least apologize for that.",'Wait.','Wait.']
+        subs.events=[pysubs2.SSAEvent(start=i*2000,end=i*2000+1500,text=text) for i,text in enumerate(source_lines)];subs.save(source)
+        context=core.read_json(self.context_path);context.update(title='Exact-ID fixture',summary='Six authored dialogue lines test identity-only translation import without source-text matching.',
+            context_sources=[{'kind':'subtitle','reference':'identity-only.ass','finding':'Six authored dialogue lines contain overlapping source phrases and repeated text.'}])
+        context_path=self.root/'identity-context.json';core.write_json(context_path,context)
+        job=self.root/'identity-job';runner.prepare(source,job,context_path=context_path)
+        request=core.read_json(job/'requests/batch-0001.json')
+        translated=['Ah!','Kimsin sen? Ah!','Özür dilerim.','Bunun için hiç değilse özür dilemek istedim.','Bekle.','Bekleyin.']
+        payload={'schema_version':1,'request_sha256':request['request_sha256'],
+                 'lines':[{'id':i,'tr_text':text} for i,text in enumerate(translated)]}
+        for changed,pattern in (({**payload,'request_sha256':'0'*64},'Stale'),
+                                ({**payload,'lines':payload['lines'][:-1]},'coverage'),
+                                ({**payload,'lines':payload['lines'][:-1]+[{'id':99,'tr_text':'Bilinmeyen.'}]},'Unknown'),
+                                ({**payload,'lines':payload['lines'][:-1]+[payload['lines'][0]]},'Duplicate')):
+            bad=self.root/'bad-import.json';core.write_json(bad,changed)
+            with self.assertRaisesRegex(ValueError,pattern):
+                runner.import_plain_translations(job,'batch-0001.json',bad)
+        incoming=self.root/'exact-import.json';core.write_json(incoming,payload)
+        result=runner.import_plain_translations(job,'batch-0001.json',incoming)
+        self.assertEqual(result['status'],'imported')
+        actual=core.read_json(job/'translations/batch-0001.json')
+        self.assertEqual([row['index'] for row in actual['lines']],list(range(6)))
+        self.assertEqual([row['tr_text'] for row in actual['lines']],translated)
+        self.assertEqual(actual['source_sha256'],request['response_shape']['source_sha256'])
+        self.assertEqual(actual['lines'][0]['tr_text'],'Ah!')
+        self.assertEqual(actual['lines'][1]['tr_text'],'Kimsin sen? Ah!')
+        self.assertEqual(actual['lines'][2]['tr_text'],'Özür dilerim.')
+        self.assertEqual(actual['lines'][3]['tr_text'],'Bunun için hiç değilse özür dilemek istedim.')
+        self.assertEqual(actual['lines'][4]['tr_text'],'Bekle.')
+        self.assertEqual(actual['lines'][5]['tr_text'],'Bekleyin.')
+        with self.assertRaisesRegex(ValueError,'already exists'):
+            runner.import_plain_translations(job,'batch-0001.json',incoming)
+
+    def test_import_plain_translations_routes_tagged_and_karaoke_rows_to_full_shape(self):
+        source=self.root/'structured-import.ass';subs=pysubs2.SSAFile()
+        subs.events=[pysubs2.SSAEvent(start=0,end=1500,text=r'{\i1}Stop{\i0} here.'),
+                     pysubs2.SSAEvent(start=2000,end=3500,text=r'{\k20}空へ',style='OP')]
+        subs.save(source)
+        context=core.read_json(self.context_path);context.update(title='Structured import fixture',summary='Tagged and karaoke events prove that compact plain import cannot flatten source-bound response shapes.',
+            context_sources=[{'kind':'subtitle','reference':'structured-import.ass','finding':'The fixture has one tagged dialogue event and one timed karaoke event.'}])
+        context_path=self.root/'structured-context.json';core.write_json(context_path,context)
+        job=self.root/'structured-job';runner.prepare(source,job,context_path=context_path)
+        request=core.read_json(job/'requests/batch-0001.json')
+        incoming=self.root/'structured-import.json';core.write_json(incoming,{'schema_version':1,'request_sha256':request['request_sha256'],
+            'lines':[{'id':0,'tr_text':'Burada dur.'},{'id':1,'tr_text':'Gökyüzüne'}]})
+        with self.assertRaisesRegex(ValueError,'Complex response item'):
+            runner.import_plain_translations(job,'batch-0001.json',incoming)
+        self.assertFalse((job/'translations/batch-0001.json').exists())
+
+    def test_import_plain_translations_rejects_a_request_hash_from_another_batch(self):
+        profile=copy.deepcopy(self.profile);profile['batch_size']=1
+        profile_path=self.root/'single-line-profile.json';core.write_json(profile_path,profile)
+        job=self.root/'two-batch-import-job';runner.prepare(self.src,job,profile_path=profile_path,context_path=self.context_path)
+        first=core.read_json(job/'requests/batch-0001.json');second=core.read_json(job/'requests/batch-0002.json')
+        incoming=self.root/'cross-batch-import.json';core.write_json(incoming,{'schema_version':1,'request_sha256':second['request_sha256'],
+            'lines':[{'id':0,'tr_text':'Kıpırdama.'}]})
+        with self.assertRaisesRegex(ValueError,'Stale'):
+            runner.import_plain_translations(job,'batch-0001.json',incoming)
+        self.assertFalse((job/'translations/batch-0001.json').exists())
+
+    def test_video_viewing_break_policy_blocks_pending_then_binds_reviewed_no_suitable(self):
+        video=self.root/'raw-video.mkv';video.write_bytes(b'authored raw video fixture')
+        job=self.root/'video-policy-job';runner.prepare(self.src,job,context_path=self.context_path,video_path=video)
+        meta=core.read_json(job/'job.json');meta.pop('orchestration_required');core.write_json(job/'job.json',meta)
+        (job/'orchestration.json').unlink()
+        request=core.read_json(job/'requests/batch-0001.json');response=request['response_shape']
+        response['lines'][0]['tr_text']='Kıpırdama.';response['lines'][1]['tr_text']='Hazır mısın?'
+        core.write_json(job/'translations/batch-0001.json',response);runner.build(job);self.review(job)
+        with self.assertRaisesRegex(ValueError,'Viewing-break candidate analysis'):
+            runner.finalize(job,self.root/'video-policy-final.ass',archive_root=self.root/'archive')
+        policy=core.read_json(job/'job.json')['viewing_breaks_policy']
+        candidate=job/'viewing_breaks'/policy['candidate_analysis_file']
+        core.write_json(candidate,{'status':'beta_candidates_needing_story_review','source_sha256':policy['video_sha256'],
+            'subtitle_sha256':policy['subtitle_sha256'],'analysis_params':policy['analysis_params'],'break_groups':[]})
+        outcome=self.root/'no-suitable.json';core.write_json(outcome,{'status':'reviewed_no_suitable',
+            'reason':'Picture, sound and nearby authored dialogue were reviewed; no story-safe stopping point exists.',
+            'reviewed_by':'fixture-reviewer'})
+        self.assertEqual(runner.record_viewing_break_outcome(job,outcome)['status'],'reviewed_no_suitable')
+        result=runner.finalize(job,self.root/'video-policy-final.ass',archive_root=self.root/'archive')
+        self.assertEqual(result['viewing_break_assessment']['status'],'reviewed_no_suitable')
+
+    def test_video_viewing_break_selected_outcome_binds_applied_chapter_record(self):
+        video=self.root/'selected-raw-video.mkv';video.write_bytes(b'chaptered raw video fixture')
+        job=self.root/'selected-video-policy-job';runner.prepare(self.src,job,context_path=self.context_path,video_path=video)
+        policy=core.read_json(job/'job.json')['viewing_breaks_policy']
+        candidate=job/'viewing_breaks'/policy['candidate_analysis_file']
+        core.write_json(candidate,{'status':'beta_candidates_needing_story_review','source_sha256':policy['video_sha256'],
+            'subtitle_sha256':policy['subtitle_sha256'],'analysis_params':policy['analysis_params'],'break_groups':[{'break_number':1,'candidates':[]}]})
+        self.assertEqual(runner.analyze_viewing_breaks(job)['status'],'cached')
+        record_name='chapters-123456789abc.json';record=job/'viewing_breaks'/record_name
+        incoming=self.root/'selected-applied.json';core.write_json(incoming,{'status':'selected_applied','chapter_record_file':record_name})
+        core.write_json(record,{'status':'beta_chapters_need_playback_review','source_sha256':policy['video_sha256'],
+            'output':str(self.root/'missing-chapter-output.mkv'),'output_sha256':'a'*64,
+            'reviewed_plan':{'source_sha256':policy['video_sha256'],'review_status':'reviewed','breaks':[{'story_safe':True}]}})
+        with self.assertRaisesRegex(ValueError,'output hash'):
+            runner.record_viewing_break_outcome(job,incoming)
+        chapter_output=self.root/'chaptered-output.mkv';chapter_output.write_bytes(b'chaptered fixture output')
+        core.write_json(record,{'status':'beta_chapters_need_playback_review','source_sha256':policy['video_sha256'],
+            'output':str(chapter_output),'output_sha256':core.file_hash(chapter_output),
+            'reviewed_plan':{'source_sha256':policy['video_sha256'],'review_status':'reviewed','breaks':[{'story_safe':True}]}})
+        self.assertEqual(runner.record_viewing_break_outcome(job,incoming)['status'],'selected_applied')
+        self.assertEqual(runner.validate_viewing_break_outcome(job,core.read_json(job/'job.json'))['status'],'selected_applied')
+        record_data=core.read_json(record);record_data['source_sha256']='b'*64;core.write_json(record,record_data)
+        with self.assertRaisesRegex(ValueError,'evidence changed'):
+            runner.validate_viewing_break_outcome(job,core.read_json(job/'job.json'))
+
+    def test_record_viewing_break_outcome_rejects_a_changed_raw_video(self):
+        video=self.root/'changed-raw-video.mkv';video.write_bytes(b'initial raw fixture')
+        job=self.root/'changed-video-policy-job';runner.prepare(self.src,job,context_path=self.context_path,video_path=video)
+        policy=core.read_json(job/'job.json')['viewing_breaks_policy'];candidate=job/'viewing_breaks'/policy['candidate_analysis_file']
+        core.write_json(candidate,{'status':'beta_candidates_needing_story_review','source_sha256':policy['video_sha256'],
+            'subtitle_sha256':policy['subtitle_sha256'],'analysis_params':policy['analysis_params'],'break_groups':[]})
+        video.write_bytes(b'changed raw fixture')
+        incoming=self.root/'changed-raw-outcome.json';core.write_json(incoming,{'status':'reviewed_no_suitable',
+            'reason':'Picture, sound and nearby authored dialogue were reviewed; no story-safe stopping point exists.',
+            'reviewed_by':'fixture-reviewer'})
+        with self.assertRaisesRegex(ValueError,'video changed'):
+            runner.record_viewing_break_outcome(job,incoming)
+
+    def test_source_only_viewing_break_policy_stays_no_media(self):
+        job=self.root/'source-only-policy-job';runner.prepare(self.src,job,context_path=self.context_path)
+        self.assertEqual(runner.analyze_viewing_breaks(job),{'status':'no_media','assessment':'not_assessed'})
+        self.assertEqual(runner.validate_viewing_break_outcome(job,core.read_json(job/'job.json')),
+                         {'status':'no_media','assessment':'not_assessed'})
+    def test_strict_orchestration_forward_flow_binds_roles_and_honest_unknown_runtime(self):
+        """Seven authored English lines exercise the new normal path without a model call."""
+        source=self.root/'seven-lines.ass';subs=pysubs2.SSAFile()
+        english=['Wait for me.','The train is late.','Do you know her?','I kept the key.','Why would he lie?','This name matters.','Let us go home.']
+        subs.events=[pysubs2.SSAEvent(start=i*2000,end=i*2000+1500,text=text) for i,text in enumerate(english)];subs.save(source)
+        context=core.read_json(self.context_path);context.update(title='Seven-line strict fixture',summary='Seven authored English dialogue lines exercise strict worker receipts and finalization.',
+            context_sources=[{'kind':'subtitle','reference':'seven-lines.ass','finding':'Seven authored English dialogue events are present for the strict workflow fixture.'}])
+        context_path=self.root/'seven-context.json';core.write_json(context_path,context)
+        job=self.root/'strict-job';runner.prepare(source,job,context_path=context_path)
+        request=core.read_json(job/'requests/batch-0001.json');response=request['response_shape']
+        for row,text in zip(response['lines'],['Beni bekle.','Tren gecikti.','Onu tanıyor musun?','Anahtarı sakladım.','Neden yalan söylesin?','Bu isim önemli.','Eve gidelim.']): row['tr_text']=text
+        core.write_json(job/'translations/batch-0001.json',response)
+        run_input=self.root/'translator-run.json';core.write_json(run_input,{
+            'role':'translator','worker_id':'fixture-translator','provenance':{'kind':'agent_declared','reference':'fixture worker receipt','reason':''},
+            'runtime':{'model_status':'unavailable','model':'','effort_status':'unavailable','effort':'','reason':'The fixture has no platform runtime telemetry.'},
+            'capability':{'status':'available','source':'Fixture coordinator recorded a separate reviewer capability.','reason':'The strict fixture dispatches a separate local reviewer receipt.'},'fallback_reason':''})
+        runner.record_worker_run(job,run_input);runner.build(job)
+        # A later review correction changes the final translation snapshot;
+        # the translator's earlier receipt remains honest archive provenance.
+        amended=core.read_json(job/'translations/batch-0001.json');amended['lines'][0]['tr_text']='Beni bekleyin.'
+        core.write_json(job/'translations/batch-0001.json',amended);runner.build(job)
+        review=core.read_json(job/'review-template.json');review.update(reviewer='fixture-reviewer',mode='independent_agent',summary='Separate fixture reviewer checked every candidate line against the authored source.')
+        for row in review['lines']:
+            row['reviewed']=True
+            if row['formatting_reviewed'] is not None: row['formatting_reviewed']=True
+        prefs=core.read_json(core.ROOT/'resources/preferences.json')
+        core.write_json(job/'learning_report.json',{'learner_profile':prefs['english_learner_profile'],
+            'estimated_cefr':{'with_english_subtitles':'B1-B2','listening_without_subtitles':'not_assessed','listening_assessment_status':'not_assessed','listening_limitations':'No audio was played in this source-only strict orchestration fixture.','confidence':'low','evidence':[{'line_index':0,'source_excerpt':'Wait for me.','reason':'Short imperative is grounded in the authored fixture.'}]},
+            'fit_for_learner':'productive_stretch','learning_points':[{'line_index':2,'source_excerpt':'Do you know her?','meaning_tr':'Onu tanıyor musun?','why_useful':'Question form is grounded in the authored fixture.'}],
+            'personal_assessment':False,'limitations':'This is a mechanics fixture, not a personal learning assessment.'})
+        review.update(learning_report_reviewed=True,learning_report_sha256=core.file_hash(job/'learning_report.json'),learning_report_review_summary='Learning fields were checked against the seven authored source lines.')
+        core.write_json(job/'review.json',review)
+        reviewer_input=self.root/'reviewer-run.json';core.write_json(reviewer_input,{
+            'role':'reviewer','worker_id':'fixture-reviewer','provenance':{'kind':'agent_declared','reference':'fixture reviewer receipt','reason':''},
+            'runtime':{'model_status':'unavailable','model':'','effort_status':'unavailable','effort':'','reason':'The fixture has no platform runtime telemetry.'},
+            'capability':None,'fallback_reason':''})
+        runner.record_worker_run(job,reviewer_input)
+        plan=core.read_json(job/'orchestration.json');(job/'orchestration.json').unlink()
+        with self.assertRaisesRegex(ValueError,'Strict orchestration plan is missing'):
+            runner.finalize(job,self.root/'strict-final.ass',archive_root=self.root/'archive')
+        core.write_json(job/'orchestration.json',plan)
+        with self.assertRaisesRegex(ValueError,'token records'):
+            runner.finalize(job,self.root/'strict-final.ass',archive_root=self.root/'archive')
+        core.write_json(job/'token_usage.json',{'schema_version':1,'runs':[{'role':'translator','measurement_status':'measured','source':'Fixture telemetry export',
+            'model':'fixture-model','input_tokens':0,'output_tokens':0,'cached_input_tokens':0,'reason':'Exact zero-token fixture telemetry was intentionally recorded.'},
+            {'role':'reviewer','measurement_status':'unavailable','source':'Fixture reviewer telemetry unavailable','model':'','input_tokens':None,'output_tokens':None,'cached_input_tokens':None,'reason':'The reviewer fixture exposes no token telemetry.'}]})
+        with self.assertRaisesRegex(ValueError,'translator, reviewer and coordinator'):
+            runner.finalize(job,self.root/'strict-final.ass',archive_root=self.root/'archive')
+        ledger=core.read_json(job/'token_usage.json');ledger['runs'].append({'role':'coordinator','measurement_status':'unavailable',
+            'source':'Fixture coordinator telemetry unavailable','model':'','input_tokens':None,'output_tokens':None,'cached_input_tokens':None,
+            'reason':'The coordinator fixture exposes no token telemetry.'});core.write_json(job/'token_usage.json',ledger)
+        self.assertEqual(usage_ledger.summarize_usage_ledger(ledger)['measurement_status'],'partial')
+        self.assertIsNone(usage_ledger.summarize_usage_ledger(ledger)['input_tokens'])
+        self.assertIsNone(analyze_audit.analyze_reports([job/'technical_report.json'])['token_usage']['input_tokens'])
+        review['summary']='Separate fixture reviewer rechecked every candidate line against the authored source.';core.write_json(job/'review.json',review)
+        with self.assertRaisesRegex(ValueError,'Reviewer worker receipt is stale'):
+            runner.finalize(job,self.root/'strict-final.ass',archive_root=self.root/'archive')
+        runner.record_worker_run(job,reviewer_input)
+        result=runner.finalize(job,self.root/'strict-final.ass',archive_root=self.root/'archive')
+        self.assertEqual(result['status'],'delivered')
+        self.assertTrue((Path(result['archive'])/'orchestration.json').is_file())
+        self.assertTrue((Path(result['archive'])/'worker_receipts/reviewer.json').is_file())
+        resumed=self.root/'strict-resumed';runner.resume_from_archive(Path(result['archive']),resumed)
+        self.assertEqual(core.read_json(resumed/'job.json')['orchestration_required'],1)
+        self.assertTrue((resumed/'orchestration.json').is_file())
+        self.assertEqual(core.read_json(resumed/'orchestration.json')['subagent_capability']['status'],'unresolved')
+        self.assertFalse((resumed/'worker_receipts/translator.json').exists())
+        self.assertEqual(core.read_json(resumed/'token_usage.json')['runs'],[])
+        runner.build(resumed)
+        resumed_review=core.read_json(resumed/'review-template.json');resumed_review.update(reviewer='fresh-reviewer',mode='independent_agent',
+            summary='Fresh reviewer checked every resumed candidate line against the authored source.')
+        for row in resumed_review['lines']:
+            row['reviewed']=True
+            if row['formatting_reviewed'] is not None: row['formatting_reviewed']=True
+        resumed_review.update(learning_report_reviewed=True,learning_report_sha256=core.file_hash(resumed/'learning_report.json'),
+            learning_report_review_summary='Fresh reviewer checked the resumed learning report against the source.')
+        core.write_json(resumed/'review.json',resumed_review)
+        with self.assertRaisesRegex(ValueError,'explicit subagent capability observation'):
+            runner.finalize(resumed,self.root/'resumed-strict-final.ass',archive_root=self.root/'archive')
     def test_drawing_passthrough_and_sign_translation(self):
         self.assertEqual(core.classify_line(pysubs2.SSAEvent(text=r'{\p1}m 0 0 l 5 5')),'PASSTHROUGH')
         self.assertEqual(core.role(pysubs2.SSAEvent(text=r'{\an8}EXIT')),'sign')
@@ -245,6 +495,17 @@ class PipelineTests(unittest.TestCase):
                         'source_reference':'Authored test instruction'},'cuts':[row]}
         with self.assertRaisesRegex(ValueError,'category'):
             cuts.reviewed_cut_requests(spec,10,require_policy=True)
+    def test_default_content_filter_policy_rejects_out_of_scope_category(self):
+        policy={'authorized':True,'requested_by':'user',
+                'instruction':'Kalıcı tercih: doğrulanmış öpüşme, cinsel yakınlık ve romantik/cinsel yatak sahnelerini çıkar.',
+                'source_reference':'resources/preferences.json:auto_content_filter + resources/content_filter_profile.json'}
+        row={'start':1,'end':2,'category':'violence',
+             'cut_reason':'This authored fixture category is intentionally outside the default profile.',
+             'evidence':'This authored fixture interval was visually inspected for a scope test.',
+             'reviewed_by':'agent'}
+        with self.assertRaisesRegex(ValueError,'outside the configured profile'):
+            cuts.reviewed_cut_requests({'policy':policy,'cuts':[row]},10,require_policy=True)
+
     def test_decode_warning_with_success_code_is_reportable_not_failure(self):
         completed=subprocess.CompletedProcess([],0,'','non monotonically increasing dts')
         with patch.object(cuts.subprocess,'run',return_value=completed):

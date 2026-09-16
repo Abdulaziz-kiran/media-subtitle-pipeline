@@ -1,5 +1,7 @@
 # İzleme molaları — beta.1
 
+Varsayılan kullanıcı tercihi `resources/preferences.json` içindeki `auto_viewing_breaks:true` alanıdır. Orkestratör bunu yalnız video mevcut olduğunda okur; altyazı görsel QA'sını açmaz. `run_pipeline.py analyze-viewing-breaks --job <iş>`, aynı kaynak video, altyazı hash'i ve analiz parametreleri için işteki aday analizini doğrulayarak yeniden kullanır; eşleşen dosya yoksa bir kez üretir. Video yoksa sonuç `no_media`/`not_assessed` kalır. Adayların görüntü, ses ve yakın diyalog incelemesinden sonra güvenli durak yoksa `reviewed_no_suitable` sonucu; source/subtitle hash'leri, analiz parametreleri, aday analiz dosyası hash'i, gerçek inceleme nedeni ve inceleyeni taşır. Teknik keyframe/silence hatası bu sonuçla karıştırılmaz.
+
 Bu isteğe bağlı özellik, uzun film veya yaklaşık 20 dakikalık anime bölümünü birden fazla oturumda izlemek için uygun durak adayları çıkarır ve onaylanan noktaları yeni bir MKV'ye bölüm işareti olarak ekler. Kaynak video değişmez. Video yeniden kodlanmaz; bütün stream ve attachment envanteri ile ses/görüntü yük hash'leri doğrulanır.
 
 Bu beta **Astra Pro 2.3.1 denetimine dahil değildir**. Araç sessizlik, altyazı boşluğu, hedef süreye yakınlık ve doğrulanmış video anahtar karelerini ölçer. Bunlar hikâyenin uygun yerde durduğunu kanıtlamaz. Ajan adayın çevresindeki görüntüyü, sesi ve diyaloğu incelemeden `review_status:"reviewed"` veya `story_safe:true` yazmaz.

@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "coordinator": {
+    "model_selected_externally": true,
+    "must_not_read_subtitle_payloads": true
+  },
+  "translator_partition": {
+    "never_mix_episode_ids": true,
+    "one_worker_per_normal_episode": true,
+    "split_threshold_translatable_lines": 1200,
+    "target_lines_per_worker_after_split": 700,
+    "max_workers_per_episode": 4,
+    "split_only_at_existing_batch_or_scene_boundaries": true
+  },
+  "antigravity": {
+    "operating_assumption": "Coordinator is normally Gemini 3.8 Flash Medium; inherit therefore supplies the medium worker tier and flash supplies the high worker tier in the current setup.",
+    "roles": {
+      "preparation": {
+        "model_selector": "inherit",
+        "intended_effort": "medium"
+      },
+      "season_context": {
+        "model_selector": "flash",
+        "intended_effort": "high"
+      },
+      "translator": {
+        "model_selector": "inherit",
+        "intended_effort": "medium"
+      },
+      "reviewer": {
+        "model_selector": "flash",
+        "intended_effort": "high"
+      },
+      "repair": {
+        "model_selector": "inherit",
+        "intended_effort": "medium"
+      },
+      "adjudicator": {
+        "model_selector": "flash",
+        "intended_effort": "high"
+      },
+      "content_filter_reviewer": {
+        "model_selector": "flash",
+        "intended_effort": "high"
+      }
+    }
+  },
+  "codex_with_antigravity_workers": {
+    "coordinator_model_selected_externally": true,
+    "worker_family": "Gemini 3.8 Flash via Antigravity/agy",
+    "roles": {
+      "preparation": {
+        "effort": "low"
+      },
+      "season_context": {
+        "effort": "high"
+      },
+      "translator": {
+        "effort": "medium"
+      },
+      "reviewer": {
+        "effort": "high"
+      },
+      "repair": {
+        "effort": "medium"
+      },
+      "adjudicator": {
+        "effort": "high"
+      },
+      "content_filter_reviewer": {
+        "effort": "high"
+      }
+    }
+  }
+}

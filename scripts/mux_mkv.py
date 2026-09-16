@@ -3,11 +3,14 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import struct
 import sys
 import tempfile
+import time
+import resource
 from content_filter_pipeline import probe,media_signature
 from subtitle_core import write_json
 from subtitle_core import ROOT,read_json,load_profile,file_hash
@@ -100,15 +103,49 @@ def inspect_fonts(fonts,expected_family=None,require_regular_bold=False):
     return rows
 
 
-def av_payload_hashes(path,info):
+def av_payload_hashes(path,info,metrics=None):
     """Hash encoded audio/video payloads so subtitle duration cannot fake preservation."""
-    result=[]
     empty_sha256='e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
-    for stream in info['streams']:
-        if stream.get('codec_type') not in ('audio','video'): continue
-        r=subprocess.run(['ffmpeg','-nostdin','-v','error','-fflags','+noparse+nofillin','-i',str(path),'-map',f"0:{stream['index']}",'-c','copy','-f','streamhash','-hash','sha256','-'],capture_output=True,text=True,check=True)
-        digest=r.stdout.strip().split('=',1)[-1].strip()
-        if not digest or digest==empty_sha256: raise ValueError('Could not verify encoded media payload: empty or missing stream data')
+    streams=[s for s in info['streams'] if s.get('codec_type') in ('audio','video')]
+    if not streams: return []
+    cmd=['ffmpeg','-nostdin','-v','error','-fflags','+noparse+nofillin','-i',str(path)]
+    for stream in streams: cmd += ['-map',f"0:{stream['index']}"]
+    cmd += ['-c','copy','-f','streamhash','-hash','sha256','-']
+    started=time.monotonic(); cpu_before=resource.getrusage(resource.RUSAGE_CHILDREN)
+    if metrics is not None: metrics['subprocess_count']=metrics.get('subprocess_count',0)+1
+    try:
+        r=subprocess.run(cmd,capture_output=True,text=True,check=True)
+    finally:
+        if metrics is not None:
+            cpu_after=resource.getrusage(resource.RUSAGE_CHILDREN)
+            metrics['wall_seconds']=metrics.get('wall_seconds',0.0)+(time.monotonic()-started)
+            user=cpu_after.ru_utime-cpu_before.ru_utime; system=cpu_after.ru_stime-cpu_before.ru_stime
+            if user>=0 and system>=0:
+                metrics['child_cpu_user_seconds']=metrics.get('child_cpu_user_seconds',0.0)+user
+                metrics['child_cpu_system_seconds']=metrics.get('child_cpu_system_seconds',0.0)+system
+    rows=[line.strip() for line in r.stdout.splitlines() if line.strip()]
+    if len(rows)!=len(streams): raise ValueError('Could not verify encoded media payload: missing stream hash')
+    parsed={}
+    for line in rows:
+        parts=line.split(',',2)
+        if len(parts)!=3:
+            raise ValueError('Could not verify encoded media payload: stream hash order mismatch')
+        try: output_index=int(parts[0].strip())
+        except ValueError: raise ValueError('Could not verify encoded media payload: stream hash order mismatch')
+        if output_index in parsed or not 0<=output_index<len(streams):
+            raise ValueError('Could not verify encoded media payload: stream hash order mismatch')
+        parsed[output_index]=parts[1].strip(),parts[2].strip()
+    result=[]
+    for output_index,stream in enumerate(streams):
+        stream_type={'video':'v','audio':'a'}[stream['codec_type']]
+        actual_type,raw_digest=parsed.get(output_index,('', ''))
+        if actual_type!=stream_type or '=' not in raw_digest:
+            raise ValueError('Could not verify encoded media payload: stream hash order mismatch')
+        algorithm,digest=raw_digest.split('=',1)
+        if algorithm.casefold()!='sha256' or not re.fullmatch(r'[0-9a-fA-F]{64}',digest.strip()):
+            raise ValueError('Could not verify encoded media payload: empty or malformed stream data')
+        digest=digest.strip().casefold()
+        if digest==empty_sha256: raise ValueError('Could not verify encoded media payload: empty or missing stream data')
         result.append((stream['codec_type'],stream.get('codec_name'),digest))
     return result
 
@@ -156,7 +193,14 @@ def mux_single(video_path,ass_path,output_path,font_path=None,sub_lang='tur',sub
             mime='application/vnd.ms-opentype' if f.suffix.lower()=='.otf' else 'application/x-truetype-font'
             cmd += ['-attach',str(f),f'-metadata:s:t:{len(attachments)+i}',f'mimetype={mime}',f'-metadata:s:t:{len(attachments)+i}',f'filename={f.name}']
         cmd.append(str(candidate))
+        mux_started=time.monotonic(); mux_cpu_before=resource.getrusage(resource.RUSAGE_CHILDREN)
+        hash_metrics={'subprocess_count':0,'mux_subprocess_count':1}
         subprocess.run(cmd,capture_output=True,text=True,check=True)
+        mux_cpu_after=resource.getrusage(resource.RUSAGE_CHILDREN)
+        hash_metrics['mux_wall_seconds']=time.monotonic()-mux_started
+        mux_user=mux_cpu_after.ru_utime-mux_cpu_before.ru_utime; mux_system=mux_cpu_after.ru_stime-mux_cpu_before.ru_stime
+        if mux_user>=0 and mux_system>=0:
+            hash_metrics['mux_child_cpu_user_seconds']=mux_user; hash_metrics['mux_child_cpu_system_seconds']=mux_system
         got=probe(candidate)
         old_sig=media_signature(info); new_sig=media_signature(got)
         # ffmpeg groups stream types in some containers; compare multiplicity, not global order.
@@ -171,13 +215,13 @@ def mux_single(video_path,ass_path,output_path,font_path=None,sub_lang='tur',sub
         if audio_idx is not None:
             outaudio=[s for s in got['streams'] if s['codec_type']=='audio']
             if [i for i,s in enumerate(outaudio) if s.get('disposition',{}).get('default')]!=[audio_idx]: raise ValueError('Audio default verification failed')
-        if av_payload_hashes(video,info)!=av_payload_hashes(candidate,got):
+        if av_payload_hashes(video,info,hash_metrics)!=av_payload_hashes(candidate,got,hash_metrics):
             raise ValueError('Audio/video payload changed during mux')
         os.link(candidate,output)
     return {'status':'muxed','output':str(output),'streams_preserved':True,'turkish_default':True,
             'audio_video_payloads_preserved':True,'attached_fonts':font_info,
             'default_audio_language':audio_language,'default_audio_reason':audio_reason,
-            'max_interleave_delta_us':0,'visual_playback':'not_checked'}
+            'max_interleave_delta_us':0,'visual_playback':'not_checked','hash_verification':hash_metrics}
 
 
 def main():

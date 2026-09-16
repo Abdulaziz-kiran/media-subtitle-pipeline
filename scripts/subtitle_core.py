@@ -12,7 +12,7 @@ import stat
 import unicodedata
 import pysubs2
 
-VERSION = '2.3.1'
+VERSION = '2.4.1'
 ROOT = Path(__file__).resolve().parent.parent
 TAG = re.compile(r'\{[^{}]*\}')
 MARKER = re.compile(r'⟪ASS:(\d+)⟫')

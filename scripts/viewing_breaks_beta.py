@@ -130,6 +130,7 @@ def analyze_breaks(video_path, subtitle_path=None, parts=None, top_candidates=5)
             })
         ranked.sort(key=lambda row: (-row['score'], abs(row['distance_from_ideal_seconds']), row['applied_time']))
         groups.append({'break_number': number, 'ideal_time': round(ideal, 3), 'candidates': ranked[:top_candidates]})
+    analysis_params={'parts':parts,'top_candidates':top_candidates}
     return {
         'status': 'beta_candidates_needing_story_review',
         'beta_feature': 'viewing_breaks',
@@ -137,6 +138,8 @@ def analyze_breaks(video_path, subtitle_path=None, parts=None, top_candidates=5)
         'astra_reviewed': False,
         'source': str(video.resolve()),
         'source_sha256': file_hash(video),
+        'subtitle_sha256': file_hash(subtitle_path) if subtitle_path else None,
+        'analysis_params': analysis_params,
         'duration': duration,
         'suggested_parts': part_count,
         'subtitle': str(Path(subtitle_path).resolve()) if subtitle_path else None,

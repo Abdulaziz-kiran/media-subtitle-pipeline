@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "profile_id": "romantic-sexual-scene-filter-v1",
+  "default_enabled": true,
+  "categories": [
+    {
+      "id": "kissing",
+      "action": "cut",
+      "definition": "Açık romantik/cinsel dudaktan öpüşme sahneleri. Yanaktan/alından ailevi veya platonik kısa öpücükler varsayılan kapsamda değildir."
+    },
+    {
+      "id": "sexual_intimacy",
+      "action": "cut",
+      "definition": "Gösterilen veya açık biçimde ima edilen cinsel eylem ile belirgin cinsel yakınlaşma/temas sahneleri. Yalnız sözlü cinsel gönderme tek başına kesim nedeni değildir."
+    },
+    {
+      "id": "intimate_bed_scene",
+      "action": "cut",
+      "definition": "Yatak/yatak odasında romantik veya cinsel yakınlığın sahnenin odağı olduğu bölümler. Sıradan uyuma, dinlenme, hastalık veya konuşma sahneleri tek başına kapsamda değildir."
+    }
+  ],
+  "ambiguous_material": "review_do_not_cut_without_visual_confirmation",
+  "require_visual_confirmation": true,
+  "require_full_episode_visual_sweep": true,
+  "subtitle_candidates_are_hints_only": true,
+  "context_note_policy": "only_when_cut_removes_story_information_needed_to_follow_the_next_kept_scene",
+  "default_policy": {
+    "authorized": true,
+    "requested_by": "user",
+    "instruction": "Kalıcı tercih: doğrulanmış öpüşme, cinsel yakınlık ve romantik/cinsel yatak sahnelerini çıkar.",
+    "source_reference": "resources/preferences.json:auto_content_filter + resources/content_filter_profile.json"
+  }
+}

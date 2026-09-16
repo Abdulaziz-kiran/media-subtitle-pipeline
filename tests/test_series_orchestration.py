@@ -39,6 +39,10 @@ class SeriesOrchestrationTests(unittest.TestCase):
     def job(self,translated=False):
         job=self.root/'job'
         runner.prepare(self.source,job,context_path=self.context,series_context_path=self.current_series_path(),episode_id='S01E01')
+        # Series snapshot regressions model pre-marker jobs; strict coverage is
+        # exercised by the dedicated pipeline forward-flow fixture.
+        meta=core.read_json(job/'job.json');meta.pop('orchestration_required');core.write_json(job/'job.json',meta)
+        (job/'orchestration.json').unlink()
         if translated:
             request=core.read_json(job/'requests/batch-0001.json');response=request['response_shape']
             response['lines'][0]['tr_text']='Dizi çevirisi.'

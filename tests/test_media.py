@@ -61,6 +61,16 @@ class MediaIntegrationTests(unittest.TestCase):
         self.assertEqual([s.get('disposition',{}).get('default') for s in audio],[0,1])
         self.assertEqual(result['default_audio_language'],'jpn')
         self.assertEqual(result['max_interleave_delta_us'],0)
+    def test_mux_preserves_previously_applied_viewing_chapters(self):
+        metadata=self.root/'chapters.ffmeta';metadata.write_text(';FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1500\ntitle=İzleme Bölümü 1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=1500\nEND=3000\ntitle=İzleme Bölümü 2\n')
+        chaptered=self.root/'chaptered-source.mkv'
+        subprocess.run(['ffmpeg','-nostdin','-v','error','-i',str(self.video),'-f','ffmetadata','-i',str(metadata),
+                        '-map','0','-map_metadata','0','-map_chapters','1','-c','copy',str(chaptered)],check=True,capture_output=True,text=True)
+        context=self.root/'chaptered-context.json';context.write_text(json.dumps({'media_type':'anime'}))
+        output=self.root/'chaptered-muxed.mkv';mux_single(chaptered,self.ass,output,context_path=context)
+        before=probe(chaptered)['chapters'];after=probe(output)['chapters']
+        self.assertEqual([(row['start_time'],row['end_time'],row.get('tags',{}).get('title')) for row in after],
+                         [(row['start_time'],row['end_time'],row.get('tags',{}).get('title')) for row in before])
     def test_original_audio_selection(self):
         audio=[{'tags':{'language':'eng'},'disposition':{}},{'tags':{'language':'jpn'},'disposition':{}}]
         self.assertEqual(choose_original_audio(audio,context={'media_type':'anime'})[:2],(1,'jpn'))

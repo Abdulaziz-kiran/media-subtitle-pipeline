@@ -76,6 +76,9 @@ class IndependentTextAndArchiveTests(unittest.TestCase):
     def make_job(self):
         job = self.root / 'job'
         runner.prepare(self.source, job, context_path=self.ctx)
+        # Historical archive fixtures predate the strict orchestration marker.
+        meta=core.read_json(job/'job.json');meta.pop('orchestration_required');core.write_json(job/'job.json',meta)
+        (job/'orchestration.json').unlink()
         core.write_json(job / 'translations/batch-0001.json', self.data)
         runner.build(job)
         review = core.read_json(job / 'review-template.json')

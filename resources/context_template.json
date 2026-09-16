@@ -20,5 +20,10 @@
   "original_audio_language": "",
   "original_audio_status": "unknown",
   "original_audio_evidence": "",
-  "songs": []
+  "songs": [],
+  "season_context_sha256": "",
+  "characters": {},
+  "recurring_elements": [],
+  "episode_notes": [],
+  "translation_guardrails": []
 }

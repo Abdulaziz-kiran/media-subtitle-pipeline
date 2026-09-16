@@ -26,6 +26,24 @@ def probe(path):
 def get_video_duration(path): return float(probe(path)['format']['duration'])
 
 
+
+
+def default_filter_categories():
+    profile=read_json(ROOT/'resources/content_filter_profile.json')
+    if not isinstance(profile,dict) or profile.get('schema_version')!=1 or not isinstance(profile.get('categories'),list):
+        raise ValueError('Invalid default content filter profile')
+    categories=set()
+    for row in profile['categories']:
+        if not isinstance(row,dict) or set(row)!={'id','action','definition'} or row.get('action')!='cut':
+            raise ValueError('Invalid default content filter category')
+        category=str(row.get('id','')).strip()
+        if len(category)<3 or len(str(row.get('definition','')).strip())<20:
+            raise ValueError('Invalid default content filter category')
+        categories.add(category)
+    if not categories:
+        raise ValueError('Default content filter profile has no cut categories')
+    return categories
+
 def normalize_cuts(cuts, duration=None):
     rows=[]
     for c in cuts:
@@ -71,6 +89,8 @@ def reviewed_cut_requests(cut_spec,duration,require_policy=False):
         category=str(c.get('category','')).strip(); reason=str(c.get('cut_reason','')).strip()
         if require_policy and (len(category)<3 or len(reason)<10):
             raise ValueError('Every production cut needs category and cut_reason')
+        if policy and 'content_filter_profile.json' in policy['source_reference'] and category not in default_filter_categories():
+            raise ValueError('Default content filter policy cannot cut category outside the configured profile')
         note=c.get('context_note')
         if note is not None and (not isinstance(note,str) or (note.strip() and len(note.strip())<10)):
             raise ValueError('Context note must be empty or concrete text')

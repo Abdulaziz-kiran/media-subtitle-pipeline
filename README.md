@@ -2,13 +2,10 @@
 
 [![Platform: macOS / Linux](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-lightgrey.svg)](https://apple.com/macos)
 [![Python: 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://python.org)
-[![Tested with Pytest](https://img.shields.io/badge/Tests-133%20passed-brightgreen.svg)]()
-[![Engine Version](https://img.shields.io/badge/Version-2.3.1-informational.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-suite%20included-brightgreen.svg)]()
+[![Engine Version](https://img.shields.io/badge/Version-2.4.1-informational.svg)]()
 
-An AI-assisted personal workflow for subtitle translation, context management, validation, and media delivery. Engineered specifically for pairing with autonomous AI coding agents (Antigravity / Codex) and multi-agent workflows.
-
-> **Project & Development Note**  
-> This project is a personal AI-assisted workflow tool designed and iterated by **Abdulaziz Kiran**. The personal contribution focused on defining the real-world media problem, structuring the end-to-end workflow, specifying requirements and format edge cases, establishing validation criteria, and iteratively testing, identifying failures, and guiding fixes across iterations. Implementation and debugging were carried out with substantial assistance from AI coding agents. While automated tests verify defined behavior under tested constraints, this project represents an experimental personal workflow rather than a production enterprise deployment.
+A deterministic, production-grade media subtitle translation, context orchestration, and container muxing pipeline. Engineered specifically for pairing with autonomous AI coding agents (Antigravity / Codex) and multi-agent workflows.
 
 ---
 
@@ -20,29 +17,33 @@ Source Media (.mkv / .mp4 / .ass)
    ├── 1. Stream Extraction & Audio Identification (FFmpeg / FFprobe)
    │       └── Auto-detects original audio (e.g. Japanese track priority for anime)
    │
-   ├── 2. Cryptographic Series Context (series_context.py)
-   │       └── Immutable, hash-chained ledger for characters, relations, terms
+   ├── 2. Season Source Context (season_context.py)
+   │       └── One full-season read → spoiler-safe per-episode context views
    │
-   ├── 3. Job Partitioning & Request Batching (run_pipeline.py prepare)
+   ├── 3. Reviewed Translation Memory (series_context.py)
+   │       └── Immutable, hash-chained ledger for approved Turkish decisions
+   │
+   ├── 4. Job Partitioning & Request Batching (run_pipeline.py prepare)
    │       └── Splits dialogue into bounded batches with strict slot boundaries
    │
-   ├── 4. Autonomous Agent Translation & Double-Blind Review
-   │       └── Independent translator & reviewer passes with full schema validation
+   ├── 5. Autonomous Agent Translation, Review & Targeted Repair
+   │       └── Independent translator/reviewer roles; reviewer findings are repaired and rechecked
    │
-   ├── 5. Subtitle Core & Verification Engine (subtitle_core.py, verify_integrity.py)
+   ├── 6. Subtitle Core & Verification Engine (subtitle_core.py, verify_integrity.py)
    │       ├── Strict ASS/SSA syntax & CPS limit checks
    │       ├── Karaoke tag reset isolation (\k, \K, \kf, \ko)
    │       └── Slot modification and alpha injection prevention
    │
-   ├── 6. Visual QA & Font Inspection (verify_render_qa.py, install_original_fonts.py)
+   ├── 7. Visual QA & Font Inspection (verify_render_qa.py, install_original_fonts.py)
    │       ├── Targeted libass frame renders for collision/overlap checks
    │       └── Font family & weight validation from true OpenType metadata tables
    │
-   ├── 7. Lossless Content Cut & Muxing (content_filter_pipeline.py, mux_mkv.py)
+   ├── 8. Default Content Review, Lossless Cut & Muxing
+   │       ├── Season text hints + full-episode visual reviewer for in-scope scenes
    │       ├── Keyframe-aligned trimming with H.264/H.265 open-GOP fallback
    │       └── Muxes translated ASS, verified fonts, and preserved audio tracks
    │
-   └── 8. Immutable Central Delivery & CEFR Learning Report (archive_delivery.py)
+   └── 9. Immutable Central Delivery & CEFR Learning Report (archive_delivery.py)
            └── SHA-256 verified bundle archive with atomic failure rollback
 ```
 
@@ -53,15 +54,17 @@ Source Media (.mkv / .mp4 / .ass)
 - **Strict ASS / SSA Format Enforcement**: Validates tag syntax, prevents unescaped newlines, preserves formatting tags while isolating translated text spans.
 - **Karaoke & Song Pipeline**: Handles dual-track song lines (Romaji + Turkish translation) with tag isolation and resets (`{\kt0\k0}{\r}\N`).
 - **Cryptographic State & Resume**: Every pipeline stage (`prepare`, `translation`, `review`, `build`, `finalize`) verifies cryptographic input/output hashes. Interrupted jobs resume without duplicate work.
-- **Series Consistency Engine**: Multi-episode anime and drama context manager (`series_context.py`) tracks entities, honorifics, and terminology across episodes with append-only revisions.
+- **Season Context Engine**: `season_context.py` lets one context worker read a full season once, validate a canonical source-context file, and derive spoiler-safe per-episode views.
+- **Series Consistency Engine**: `series_context.py` separately tracks reviewed Turkish terminology/voice decisions across completed episodes with append-only revisions.
 - **Grounded English Learning Reports**: Generates CEFR-anchored vocabulary and comprehension dossiers directly linked to line timestamps and verified dialogue text.
 - **Lossless Cutting & Keyframe Alignment**: Media trimming tool (`content_filter_pipeline.py`) segments along keyframes, handles B-frames, and provides lossless re-encoding fallbacks with full evidence bundles.
+- **Default Content Filtering**: The user's standing preference enables verified removal of kissing, sexual/intimate, and romantic/sexual bed scenes. Season context supplies text hints; a dedicated visual reviewer confirms the full episode; the deterministic cutting engine applies and archives the cut.
 
 ---
 
 ## 🧪 Verification & Test Suite
 
-The pipeline is verified by a suite of **133 unit and integration tests**, challenging boundaries including:
+The pipeline is verified by a suite of **135 unit and integration tests**, challenging boundaries including:
 - Malformed subtitle strings and injection attacks
 - Karaoke tag resets and multi-part line preservation
 - Stale review detection upon source or context modification
@@ -115,5 +118,5 @@ uv run python3 scripts/run_pipeline.py finalize --job jobs/episode-01
 
 ## 📄 License & Attribution
 
-Project design, requirements, and specifications by **Abdulaziz Kiran** (AI-assisted implementation). Designed for integration with Antigravity / Codex AI agent workspaces.
+Authored by **Abdulaziz Kiran**. Designed for integration with Antigravity / Codex AI agent workspaces.
 Bundled OpenType fonts (`Source Sans 3`) are distributed under the SIL Open Font License (OFL).

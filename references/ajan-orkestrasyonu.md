@@ -1,81 +1,138 @@
-# Tek seri sohbetinde ajan orkestrasyonu
+# Sezon/film ajan orkestrasyonu
 
-Bu akış alt ajan desteği olan Codex veya eşdeğer bir ortamda kullanılır. Ortak skill uygulamaya özgü ajan API'si çağırmaz; dosya ve makbuz protokolünü tanımlar. Ana koordinatör bir animeyi veya diziyi tek sohbette yürütebilir, fakat altyazı metni yalnız bölüm ajanlarının bağlamına girer.
+Bu belge, kullanıcının tek bir yüksek seviyeli komutla (`"Bu animenin 1. sezonunu çevir"`) bütün akışı başlatabilmesi için rol sınırlarını ve iş paylaşımını tanımlar. Ana koordinatör içerik üreticisi değil süreç yöneticisidir.
 
-## Seri bağlamı
+## Roller
 
-Seri işinin başında bir kez oluştur:
+### 1. Ana koordinatör
 
-```sh
-python <skill_dir>/scripts/series_context.py init --series-root <seri>/series-context --series-id <güvenli-kimlik> --title <başlık>
-python <skill_dir>/scripts/series_context.py inspect --series-root <seri>/series-context
+Modeli ve eforu kullanıcı/çalışma ortamı seçer; skill en güçlü modeli zorunlu tutmaz.
+
+Yapar:
+- sezon/film işini başlatır,
+- hazırlık, sezon bağlamı, çeviri, review, repair, varsayılan içerik incelemesi ve gerekirse adjudication ajanlarını çağırır,
+- dosya yolları, hash'ler, kısa makbuzlar, hata kodları ve aşama durumlarını izler,
+- hangi bölümün hazır olduğunu ve hangi işçinin tekrar çağrılması gerektiğini belirler,
+- finalize ve arşivleme bariyerlerini uygular.
+
+Yapmaz:
+- kaynak altyazıyı kendi bağlamına almaz,
+- tam çeviri veya review dosyalarını okumaz,
+- dilsel karar vermez,
+- işçi başarısını serbest metin "tamamlandı" mesajından kabul etmez.
+
+## 2. Hazırlık/operasyon ajanı
+
+Yerel Python/FFmpeg araçlarını çalıştırır. Kaynak dosyaları keşfeder, altyazıları çıkarır, bölüm kimliklerini kurar, manifest/read-pack/job klasörlerini hazırlar ve deterministic komutların başarısını doğrular. Dilsel karar vermez.
+
+## 3. Sezon Bağlam Ajanı
+
+Normal 12-24 bölümlük bir sezon için **tek taze ajan** bütün `season_reading_pack.json` dosyasını bir kez okur ve tek kanonik `season_context.json` üretir. Ayrıntılı görev sözleşmesi `references/sezon-baglami.md` içindedir.
+
+Bu ajan:
+- sezon çapında karakterleri,
+- yönlü ilişkileri ve hitapları,
+- karakter seslerini,
+- terminolojiyi,
+- tekrar eden espri/callback/ifadeleri,
+- bölüm bazlı çeviri notlarını,
+- gelecekteki bilgiyi erken açıklamayı önleyen guardrail'leri,
+- çözülemeyen belirsizlikleri,
+- içerik filtresi açıksa yalnız metinden görülebilen hassas sahne adaylarını
+satır/hash kanıtıyla çıkarır. Adaylar kesim kararı değildir.
+
+Ayrı ikinci bağlam ajanı varsayılan değildir. Yalnız sezon platform sınırına sığmıyorsa, ilk ajan belirli bir kapsamı çözemediğini açıkça bildiriyorsa veya kullanıcı bağımsız ikinci doğrulama istiyorsa açılır. İkinci ajan mümkünse yalnız problemli kapsamı okur.
+
+## 4. Bölüm görünümü
+
+`season_context.json` hiçbir bölüm çevirmenine doğrudan verilmez. `season_context.py derive-episode` ilgili bölüm için `context.json` üretir. Gelecek bölüm occurrence'ları, henüz geçerli olmayan ilişki/ses kayıtları ve spoiler niteliğindeki ham bilgi görünümden çıkarılır; yalnız güvenli guardrail kalır.
+
+`series_context.json` ayrı katmandır: önceki finalize + bağımsız review sonrasında gerçekten onaylanmış Türkçe terim ve ilişki kararlarını hash-zincirli biçimde taşır. Çevirmen böylece hem spoiler-güvenli kaynak bağlamını hem de geçmişte onaylanmış Türkçe kararları görür.
+
+## 5. Çevirmen ajanı
+
+Normal anime/dizi bölümü için varsayılan **bir bölüm = bir taze çevirmen**dir. Her 20 satırlık batch için yeni ajan açılmaz; aynı ajan atanmış bölümün batch'lerini sırayla işler.
+
+İş paylaşımı `resources/orchestration_profile.json` ile sınırlandırılır ve `scripts/translator_assignment.py --job <iş>` tarafından somut `translator_plan.json` dosyasına çevrilir:
+- farklı bölüm kimlikleri aynı çevirmen parçasında asla karıştırılmaz,
+- normal bölüm tek işçide kalır,
+- yalnız çevrilebilir satır sayısı split eşiğini aşarsa aynı bölüm kendi içinde bölünür,
+- bölme mevcut batch/sahne sınırlarında yapılır,
+- bir işçi yalnız kendisine atanmış kesintisiz aralığı yazar.
+
+Çevirmen başlangıçta yalnız:
+- `context.json`,
+- varsa `series_context.json`,
+- `profile.json`,
+- kendisine atanmış `requests/batch-*.json`
+okur. Kaynak metinden fuzzy/prefix/substring eşleştirmeyle satır seçmek yasaktır; ID/hash sözleşmesi korunur.
+
+Çevirmen bağlamı veya kanonik sözlüğü doğrudan değiştirmez. Gerçek bir belirsizlik görürse onu hedefli problem kaydı olarak işaretleyebilir; her satıra yapay güven puanı üretmez.
+
+## 6. Bağımsız reviewer
+
+Çeviri tamamlanıp aday kurulduktan sonra taze, bağımsız reviewer kaynak ↔ aday karşılaştırması yapar. Kontrol kapsamı en az:
+- anlam kayması,
+- olumsuzluk,
+- özne/nesne,
+- iyelik yönü,
+- soru yapısı,
+- hitap ve sosyal mesafe,
+- terminoloji,
+- karakter sesi/kayıt,
+- ima/mizah/kelime oyunu,
+- atlama veya kaynakta olmayan ekleme,
+- satır/format/karaoke bağları.
+
+Reviewer normal akışta çeviri dosyasını topluca yeniden yazmaz. Sorunları `issues.json` içinde satır kimliği, hata sınıfı, gerekçe ve düzeltme yönüyle raporlar. Sorun yoksa final review kaydını üretir.
+
+## 7. Repair ajanı
+
+Repair yalnız reviewer'ın doğrulanmış sorun kapsamını, gerekli komşu satırları ve bölüm bağlamını görür. Bölümü yeniden çevirmeye veya işaretlenmemiş satırları stil amacıyla değiştirmeye yetkili değildir. Düzeltme sonrası aday yeniden kurulur ve değişen kapsam reviewer tarafından yeniden incelenir.
+
+## 8. Adjudicator / hakem
+
+Normal akışta çağrılmaz. Translator/reviewer/repair arasında gerçekten çözülemeyen semantik bir anlaşmazlık kaldığında yalnız problemli satır + yakın bağlam + ilgili kanıt ile taze güçlü ajan çağrılır. Bütün bölümü yeniden okumak varsayılan değildir.
+
+## 9. İçerik İnceleme Ajanı
+
+Yeni videolu işlerde kullanıcı tercihiyle varsayılan aktiftir. Sezon Bağlam Ajanının bütün sezonu ikinci kez okutmaz. Her bölüm için `season_context.py derive-filter-review` çıktısını alır; bu küçük paket yalnız etkin filtre profilini, kaynak hash'ini ve o bölüme ait metin adaylarını taşır.
+
+Ajanın görevi:
+- bölümün tamamını görsel olarak taramak,
+- metin adaylarının çevresini görüntü/ses/hikâye bağlamında daha yoğun doğrulamak,
+- konuşmasız sahneleri de aramak,
+- yalnız profil kapsamındaki kesin sahneler için başlangıç/bitiş zamanı, kategori, gerekçe ve somut kanıt yazmak,
+- kesim gerekiyorsa mevcut `content_filter_pipeline.py` aracını çağırmak.
+
+Ajan videoyu kendi yöntemleriyle yeniden kodlamaz veya zaman çizelgesini elle düzenlemez. Semantik kararı verir; keyframe hizalaması, video/altyazı kesimi, yeniden zamanlama ve kanıt arşivi deterministik motora aittir. Metin adayı olmaması bölümün temiz olduğunu kanıtlamaz.
+
+## 10. Seri bağlamının ilerlemesi
+
+Final ve bağımsız review sonrasında yalnız kalıcılaşmış Türkçe kararlar `series_update.json` üzerinden `series_context.py advance` ile yeni hash-zincirli revizyona taşınır. Sezon bağlamının kaynak analizi bu aşamada yeniden yazılmaz.
+
+## 11. Model/efor profili
+
+Rol-model varsayımları kod içine dağıtılmaz. Tek kaynak `resources/orchestration_profile.json` dosyasıdır. Kullanıcı çalışma anında bunları geçersiz kılabilir.
+
+Mevcut tercih:
+- Antigravity doğrudan kullanımında ana Gemini 3.8 Flash Medium ise `inherit` orta katmanı, `flash` yüksek katmanı sağlar; sezon bağlamı/reviewer/içerik-inceleme/adjudicator `flash`, çevirmen/repair/hazırlık `inherit` kullanır.
+- Codex orkestratör olsa bile işçiler ağırlıklı olarak Antigravity/agy üzerinden Gemini 3.8 Flash kullanabilir; Codex tarafında preparation düşük, season-context yüksek, translator orta, reviewer yüksek, content-filter-reviewer yüksek, repair orta, adjudicator yüksek efor hedefidir.
+
+Bu değerler operasyon profili, kalite kanıtı değildir; gerçek çalışma modeli/eforu yalnız telemetri varsa doğrulanmış sayılır.
+
+## 12. Ana koordinatörün gördüğü şey
+
+Ana koordinatöre en fazla kısa durum/makbuz dönmelidir, örneğin:
+
+```json
+{
+  "job": "S01E07",
+  "stage": "translation",
+  "status": "complete",
+  "artifact_sha256": "...",
+  "warnings": 0
+}
 ```
 
-`inspect` yalnız güncel revizyonu, hash'i, kapsanan son bölümü ve kayıt sayılarını döndürür. Terim veya replik döndürmez. `current_file` içindeki değişmez revizyon, bölüm hazırlanırken kullanılır:
-
-```sh
-python <skill_dir>/scripts/run_pipeline.py prepare --input <kaynak.ass> --job <bölüm-işi> --context <episode-context.json> --series-context <current_file> --episode-id S01E01
-python <skill_dir>/scripts/run_pipeline.py receipt --job <bölüm-işi> --stage context
-```
-
-Seri revizyonu yalnız kalıcı sözlük, alias, hitap/ilişki, karakter sesi ve açık belirsizlikleri tutar. Tam replik, `source_text`, `tr_text`, altyazı dökümü ve log alanları yoktur. Kanıt; bölüm kimliği, kaynak altyazı hash'i ve satır kimlikleriyle bağlanır.
-
-## Bölüm ajanları
-
-1. Taze çevirmen ajanı yalnız skill yolu, bölüm iş yolu ve rol talimatıyla başlat. Ana sohbetin geçmişini aktarma. Ajan `context.json`, `series_context.json`, `profile.json` ve sırayla yalnız kendi `requests/batch-*.json` dosyalarını okur. `response_shape` içindeki bütün hash bağlarını koruyup çevirileri dosyaya atomik yazar.
-2. Çevirmen final mesajında altyazı, alıntı, log veya özet yazmaz. `receipt --stage translation` komutunu çalıştırıp yalnız `receipt_path`, `receipt_sha256`, `stage`, `status` döndürür. Ana koordinatör serbest ajan beyanını değil bu makbuzu okur.
-3. Makbuz `complete` ise adayı kur. Ardından ilk ajanın geçmişini almayan ayrı inceleme ajanı başlat. İnceleyici kaynak ve çeviriyi dosyadan hedefli partiler halinde karşılaştırır; kişi/iyelik/soru, anlam, terim, ses ve biçim kontrollerini yapar.
-4. İnceleyici sorun bulursa ayrı bir sorun dosyası yazar; ana sohbete replik taşımaz. Çevirmen düzeltir, yeniden `build` yapılır ve inceleyici son hash'i tekrar inceler. İnceleyici çeviriyi kendisi düzeltip kendi sonucunu ikinci kez okursa review modu `same_agent_second_pass` olur; gerçekten farklı ajan son adayı denetlediyse `independent_agent` kullanılır.
-5. `receipt --stage review` makbuzu tam hash/kapsam denetiminden geçmeden `finalize` yapma. Finalden sonra `receipt --stage delivery` kullan. Makbuzun `complete` olması anlamsal kalitenin otomatik kanıtı değildir; gerçek review beyanı arşivde kalır.
-
-Bölümler seri bağlamı nedeniyle varsayılan olarak sırayla ilerler. Olağanüstü uzun bölümde iki çevirmen kullanılacaksa ayrık batch aralıkları ata; aynı dosyayı iki ajana yazdırma. Ayrı inceleme ajanı için en az bir slot ayır.
-
-## Koordinatör akış diyagramı
-
-```mermaid
-flowchart TD
-    A["Seri başlat: series_context.py init"] --> B["inspect → current_file al"]
-    B --> C["Bölüm context.json hazırla"]
-    C --> D["prepare --series-context --episode-id"]
-    D --> E["receipt --stage context"]
-    E -->|complete| F["Taze çevirmen ajanı başlat"]
-    E -->|invalid| C
-
-    F --> G["Çevirmen: batch oku → çevir → translations/ yaz"]
-    G --> H["Çevirmen: receipt --stage translation"]
-    H -->|incomplete| G
-    H -->|complete| I["Koordinatör: build"]
-
-    I --> J["Ayrı inceleme ajanı başlat"]
-    J --> K["İnceleyici: kaynak ↔ çeviri karşılaştır"]
-    K -->|sorun var| L["Sorun dosyası yaz → çevirmen düzeltir"]
-    L --> I
-    K -->|temiz| M["review.json yaz"]
-
-    M --> N["receipt --stage review"]
-    N -->|complete| O["finalize"]
-    N -->|invalid| K
-
-    O --> P["receipt --stage delivery"]
-    P -->|complete| Q["series_context.py advance"]
-    Q --> R{"Sonraki bölüm var mı?"}
-    R -->|evet| B
-    R -->|hayır| S["Seri tamamlandı"]
-```
-
-## Bölüm sonunda seri güncellemesi
-
-Final ve review tamamlandıktan sonra taze bağlam küratörü bölümde kalıcılaşması gereken terim, ilişki, ses veya belirsizlikleri `series_update.json` içinde hazırlar. `next_context`, kullanılan bazın tam sonraki revizyonudur. Mevcut bir kayıt değişiyorsa `changes` içinde koleksiyon, kimlik, eski kaydın tam hash'i ve somut neden bulunur. Kayıt silinmez; gerekiyorsa `retired` yapılır.
-
-```sh
-python <skill_dir>/scripts/series_context.py advance --series-root <seri>/series-context --update <bölüm-işi>/series_update.json
-```
-
-Araç seri kilidi altında `base_sha256` karşılaştırır, yeni değişmez revizyonu ve update kanıtını saklar, sonra `current.json` işaretçisini atomik yeniler. Baz eskidiyse veya aynı kayıt sessizce değiştirildiyse durur. Çakışma bağlam küratörü tarafından yeni bazda yeniden incelenir; son yazanı otomatik kazanan sayma. Sonraki bölüm ancak bu birleştirme bariyerinden sonra güncel revizyonla başlar. Eski bölüm kendi arşivindeki snapshot ile yeniden üretilebilir kalır ve gelecekteki bölüm bilgilerini almaz.
-
-## Hata ve fallback
-
-- Eksik, kısmi, yanlış kaynak/bağlam/profil/seri/istek hash'li batch makbuzda başarı sayılmaz. Ajanın “tamamlandı” yazması bunu değiştirmez.
-- Ayrıntılı hata ve FFmpeg logu dosyada kalır. Ana sohbet yalnız sınırlı hata kodu, sayaç ve hash görür. Kullanıcı kararı gerekiyorsa yalnız hedef terim/seçenek/ilişki özeti getirilir; tüm sahne dökülmez.
-- Bir işçi kesilirse yalnız geçerli atomik batch'ler korunur; kalanlar taze ajana verilir.
-- Alt ajan yoksa ana koordinatör seri metnini kendi bağlamına toplamaz; bölüm başına ayrı sohbet ve `handoff` fallback'ine döner. Bu durumda ayrı ajan yapılmadıysa review `same_agent_second_pass` olarak kaydedilir.
+Tam altyazı, uzun log, tam `technical_report.json`, render görseli veya review metni ana koordinatöre taşınmaz.

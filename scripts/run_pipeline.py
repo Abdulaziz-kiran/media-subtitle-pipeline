@@ -4,6 +4,7 @@ No simulated LLM scores, API charges, or implied unattended translation.
 """
 from __future__ import annotations
 import argparse
+import copy
 from contextlib import contextmanager
 import fcntl
 import json
@@ -18,6 +19,16 @@ from archive_delivery import archive_delivery, verify_existing_bundle
 from subtitle_core import (VERSION, ROOT, file_hash, object_hash, read_json, write_json, load_profile,
                            protected, role, classify_line, build_candidate, save_ass, response_item, visible, ensure_plain_tree, publish_directory)
 from series_context import validate_series_context
+from usage_ledger import blank_usage_ledger, validate_usage_ledger, summarize_usage_ledger
+from orchestration_contract import (STRICT_MARKER_VERSION, blank_orchestration_plan, compact_summary,
+                                    load_plan, update_capability, validate_run_input,
+                                    validate_worker_receipts, write_worker_receipt)
+from viewing_breaks_policy import (analysis_cache_key, auto_enabled, no_media_outcome,
+                                   reviewed_no_suitable_outcome, validate_reviewed_no_suitable)
+
+
+VIEWING_BREAKS_POLICY_VERSION=1
+VIEWING_BREAKS_PARAMS={'parts':None,'top_candidates':5}
 
 
 def ensure_mutable_job(job):
@@ -38,6 +49,11 @@ def validate_context(context):
     if len(context['summary'].strip())<20: raise ValueError('Prepared context summary is too weak to audit')
     for key,kind in (('glossary',dict),('relationships',list),('voices',dict),('uncertainties',list),('songs',list),('context_sources',list)):
         if not isinstance(context.get(key),kind): raise ValueError('Invalid context field: '+key)
+    for key,kind in (('characters',dict),('recurring_elements',list),('episode_notes',list),('translation_guardrails',list)):
+        if key in context and not isinstance(context.get(key),kind): raise ValueError('Invalid optional context field: '+key)
+    season_sha=context.get('season_context_sha256','')
+    if season_sha and (not isinstance(season_sha,str) or not re.fullmatch(r'[0-9a-f]{64}',season_sha)):
+        raise ValueError('season_context_sha256 must be a SHA-256 when present')
     allowed_sources={'subtitle','media_metadata','official_reference','user_instruction','audio_visual_review'}
     if not context['context_sources']: raise ValueError('Prepared context needs at least one concrete source')
     for source in context['context_sources']:
@@ -77,7 +93,7 @@ def job_lock(job):
         finally: fcntl.flock(lock,fcntl.LOCK_UN)
 
 
-def prepare(source, job, profile_path=None, context_path=None, series_context_path=None, episode_id=None):
+def prepare(source, job, profile_path=None, context_path=None, series_context_path=None, episode_id=None, video_path=None):
     source,job=Path(source).resolve(),Path(job).resolve()
     if job.exists():
         raise ValueError('Job already exists; use status/build to resume')
@@ -113,6 +129,10 @@ def prepare(source, job, profile_path=None, context_path=None, series_context_pa
         sha=file_hash(tmp/source_name)
         write_json(tmp/'profile.json',profile)
         write_json(tmp/'context.json',context)
+        # A real usage record is supplied by the coordinator after agent work. Empty means unrecorded, never zero.
+        write_json(tmp/'token_usage.json',blank_usage_ledger())
+        # This marker makes the plan mandatory for new jobs.  Old jobs lack the marker and remain readable.
+        write_json(tmp/'orchestration.json',blank_orchestration_plan())
         if series_context is not None: write_json(tmp/'series_context.json',series_context)
         context_sha=file_hash(tmp/'context.json');profile_sha=file_hash(tmp/'profile.json')
         series_sha=file_hash(tmp/'series_context.json') if series_context is not None else None
@@ -142,14 +162,251 @@ def prepare(source, job, profile_path=None, context_path=None, series_context_pa
             entry={'file':name,'indices':ids}
             if series_context is not None: entry['request_sha256']=request_sha
             entries.append(entry)
+        viewing_policy={'version':VIEWING_BREAKS_POLICY_VERSION,'enabled':auto_enabled()}
+        if viewing_policy['enabled']:
+            folder=tmp/'viewing_breaks';folder.mkdir()
+            if video_path is None:
+                viewing_policy.update(video_supplied=False,outcome_file='auto-outcome.json')
+                outcome=no_media_outcome(None,sha)
+            else:
+                video=Path(video_path).resolve()
+                if not video.is_file(): raise ValueError('Viewing-break video source is missing')
+                video_sha=file_hash(video)
+                cache_key=analysis_cache_key(video_sha,sha,VIEWING_BREAKS_PARAMS)
+                viewing_policy.update(video_supplied=True,video_path=str(video),video_sha256=video_sha,
+                                      subtitle_sha256=sha,analysis_params=VIEWING_BREAKS_PARAMS,
+                                      candidate_analysis_file=f'candidates-{cache_key}.json',outcome_file='auto-outcome.json')
+                outcome={'status':'pending','assessment':'pending_review','source_sha256':video_sha,
+                         'subtitle_sha256':sha,'analysis_params':VIEWING_BREAKS_PARAMS,
+                         'reason':'Video supplied; candidate analysis and actual picture/audio/dialogue review are pending.'}
+            write_json(folder/'auto-outcome.json',outcome)
         metadata={'engine_version':VERSION,'source_name':source_name,'source_original':str(source),'source_sha256':sha,
-                  'batches':entries,'passthrough':[{'index':i,'role':role(e)} for i,e in enumerate(subs) if i not in indices]}
+                  'orchestration_required':STRICT_MARKER_VERSION,
+                  'batches':entries,'passthrough':[{'index':i,'role':role(e)} for i,e in enumerate(subs) if i not in indices],
+                  'viewing_breaks_policy':viewing_policy}
         if series_context is not None:
             metadata.update(series_id=series_context['series_id'],series_revision=series_context['revision'],episode_id=episode_id,
                             translation_input_sha256=translation_input_sha,translation_bindings=bindings)
         write_json(tmp/'job.json',metadata)
         publish_directory(tmp,job)
-    return {'status':'awaiting_translation','job':str(job),'batches':len(batches),'lines':len(indices),'passthrough':len(metadata['passthrough'])}
+    return {'status':'awaiting_translation','job':str(job),'batches':len(batches),'lines':len(indices),'passthrough':len(metadata['passthrough']),
+            'viewing_breaks':outcome['status'] if viewing_policy['enabled'] else 'disabled'}
+
+
+def import_plain_translations(job, batch_name, input_path):
+    """Write one plain-text batch from explicit IDs, never from source text.
+
+    This compact entry point is deliberately narrower than the full
+    ``response_shape`` path.  It copies the prepared shape (and therefore its
+    bindings) only for untagged, non-karaoke rows, then replaces translations
+    by the caller's exact IDs.  Rich ASS/karaoke rows must retain their full
+    structured response shape rather than being flattened here.
+    """
+    job=Path(job).resolve(); ensure_mutable_job(job)
+    if not isinstance(batch_name,str) or not re.fullmatch(r'batch-[0-9]{4,}\.json',batch_name):
+        raise ValueError('Invalid translation batch path')
+    incoming=read_json(input_path)
+    if not isinstance(incoming,dict) or set(incoming)!={'schema_version','request_sha256','lines'} or incoming['schema_version']!=1:
+        raise ValueError('Import input needs exactly schema_version, request_sha256 and lines')
+    if not isinstance(incoming['request_sha256'],str) or not re.fullmatch(r'[0-9a-f]{64}',incoming['request_sha256']):
+        raise ValueError('Import request_sha256 is invalid')
+    if not isinstance(incoming['lines'],list):
+        raise ValueError('Import lines must be a list')
+    supplied={}
+    for item in incoming['lines']:
+        if not isinstance(item,dict) or set(item)-{'id','tr_text','unchanged_reason'} or not {'id','tr_text'} <= set(item):
+            raise ValueError('Each import line needs only id, tr_text and optional unchanged_reason')
+        line_id=item['id']
+        if type(line_id) is not int or line_id<0:
+            raise ValueError('Import line id must be a non-negative integer')
+        if line_id in supplied:
+            raise ValueError('Duplicate import line id: '+str(line_id))
+        if not isinstance(item['tr_text'],str) or not item['tr_text'].strip():
+            raise ValueError('Import translation text is missing: '+str(line_id))
+        if 'unchanged_reason' in item and (not isinstance(item['unchanged_reason'],str) or not item['unchanged_reason'].strip()):
+            raise ValueError('Import unchanged_reason must be concrete when supplied')
+        supplied[line_id]=item
+    with job_lock(job):
+        meta,_,_=load_job(job)
+        entry=next((b for b in meta['batches'] if b.get('file')==batch_name),None)
+        if entry is None:
+            raise ValueError('Unknown translation batch: '+batch_name)
+        request=read_json(job/'requests'/batch_name)
+        if incoming['request_sha256']!=request.get('request_sha256'):
+            raise ValueError('Stale or wrong import request_sha256')
+        response=request.get('response_shape')
+        if not isinstance(response,dict) or not isinstance(response.get('lines'),list):
+            raise ValueError('Prepared response_shape is invalid')
+        expected_ids=[]
+        for expected in response['lines']:
+            # Structured response rows contain source-bound parts, karaoke or
+            # romaji metadata.  Requiring the full path keeps them intact.
+            if not isinstance(expected,dict) or set(expected)!={'index','unchanged_reason','tr_text'}:
+                raise ValueError('Complex response item requires the full response_shape path')
+            index=expected['index']
+            if type(index) is not int or index in expected_ids:
+                raise ValueError('Prepared response_shape has invalid line IDs')
+            expected_ids.append(index)
+        expected_set=set(expected_ids)
+        unknown=set(supplied)-expected_set
+        missing=expected_set-set(supplied)
+        if unknown:
+            raise ValueError('Unknown import line IDs: '+str(sorted(unknown)))
+        if missing:
+            raise ValueError('Import coverage is missing line IDs: '+str(sorted(missing)))
+        if expected_set!=set(entry['indices']):
+            raise ValueError('Prepared response_shape does not match batch coverage')
+        output=job/'translations'/batch_name
+        if output.exists() or output.is_symlink():
+            raise ValueError('Translation batch already exists; use the full response_shape path for an amendment')
+        translated=copy.deepcopy(response)
+        for row in translated['lines']:
+            item=supplied[row['index']]
+            row['tr_text']=item['tr_text']
+            if 'unchanged_reason' in item:
+                row['unchanged_reason']=item['unchanged_reason']
+        write_json(output,translated,overwrite=False)
+    return {'status':'imported','batch':batch_name,'lines':len(expected_ids),'translation_path':str(output)}
+
+
+def _viewing_policy(job, meta):
+    policy=meta.get('viewing_breaks_policy')
+    if policy is None: return None
+    if not isinstance(policy,dict) or policy.get('version')!=VIEWING_BREAKS_POLICY_VERSION or type(policy.get('enabled')) is not bool:
+        raise ValueError('Viewing-break policy is invalid')
+    if not policy['enabled']: return policy
+    if not isinstance(policy.get('outcome_file'),str) or policy['outcome_file']!='auto-outcome.json':
+        raise ValueError('Viewing-break outcome path is invalid')
+    if policy.get('video_supplied') is False:
+        return policy
+    required={'video_path','video_sha256','subtitle_sha256','analysis_params','candidate_analysis_file'}
+    if policy.get('video_supplied') is not True or not required <= set(policy):
+        raise ValueError('Viewing-break video policy is incomplete')
+    if policy['subtitle_sha256']!=meta['source_sha256'] or not re.fullmatch(r'[0-9a-f]{64}',policy['video_sha256']):
+        raise ValueError('Viewing-break video policy is stale')
+    if policy['analysis_params']!=VIEWING_BREAKS_PARAMS or not re.fullmatch(r'candidates-[0-9a-f]{64}\.json',policy['candidate_analysis_file']):
+        raise ValueError('Viewing-break analysis policy is invalid')
+    return policy
+
+
+def _candidate_analysis(job, policy):
+    path=Path(job)/'viewing_breaks'/policy['candidate_analysis_file']
+    if not path.is_file(): raise ValueError('Viewing-break candidate analysis is missing')
+    report=read_json(path)
+    if (not isinstance(report,dict) or report.get('status')!='beta_candidates_needing_story_review'
+            or report.get('source_sha256')!=policy['video_sha256']
+            or report.get('subtitle_sha256')!=policy['subtitle_sha256']
+            or report.get('analysis_params')!=policy['analysis_params']):
+        raise ValueError('Viewing-break candidate analysis is stale or mismatched')
+    return path,report
+
+
+def analyze_viewing_breaks(job):
+    """Create or reuse the one candidate analysis bound to a prepared video job."""
+    job=Path(job).resolve();ensure_mutable_job(job)
+    with job_lock(job):
+        meta,source,_=load_job(job);policy=_viewing_policy(job,meta)
+        if policy is None or not policy['enabled']:
+            raise ValueError('Automatic viewing breaks are disabled for this job')
+        outcome=read_json(job/'viewing_breaks'/policy['outcome_file'])
+        if policy.get('video_supplied') is False:
+            if outcome.get('status')!='no_media': raise ValueError('Viewing-break no-media outcome is invalid')
+            return {'status':'no_media','assessment':'not_assessed'}
+        video=Path(policy['video_path'])
+        if not video.is_file() or file_hash(video)!=policy['video_sha256']:
+            raise ValueError('Prepared viewing-break video changed or is unavailable')
+        target=job/'viewing_breaks'/policy['candidate_analysis_file']
+        if target.exists() or target.is_symlink():
+            _candidate_analysis(job,policy)
+            return {'status':'cached','candidate_analysis_path':str(target),'candidate_analysis_sha256':file_hash(target)}
+        from viewing_breaks_beta import analyze_breaks
+        report=analyze_breaks(video,source,policy['analysis_params']['parts'],policy['analysis_params']['top_candidates'])
+        if (report.get('source_sha256')!=policy['video_sha256'] or report.get('subtitle_sha256')!=policy['subtitle_sha256']
+                or report.get('analysis_params')!=policy['analysis_params']):
+            raise ValueError('Viewing-break analysis did not retain prepared bindings')
+        write_json(target,report,overwrite=False)
+        return {'status':'analyzed','candidate_analysis_path':str(target),'candidate_analysis_sha256':file_hash(target)}
+
+
+def record_viewing_break_outcome(job, input_path):
+    """Bind a reviewed no-break decision or applied-chapter record to one analysis."""
+    job=Path(job).resolve();ensure_mutable_job(job);incoming=read_json(input_path)
+    if not isinstance(incoming,dict) or not isinstance(incoming.get('status'),str):
+        raise ValueError('Viewing-break outcome input needs a status')
+    with job_lock(job):
+        meta,_,_=load_job(job);policy=_viewing_policy(job,meta)
+        if policy is None or not policy['enabled'] or policy.get('video_supplied') is not True:
+            raise ValueError('Viewing-break outcome recording requires a prepared video job')
+        video=Path(policy['video_path'])
+        if not video.is_file() or file_hash(video)!=policy['video_sha256']:
+            raise ValueError('Prepared viewing-break video changed or is unavailable')
+        candidate_path,_=_candidate_analysis(job,policy);candidate_sha=file_hash(candidate_path)
+        if incoming['status']=='reviewed_no_suitable':
+            if set(incoming)!={'status','reason','reviewed_by'}:
+                raise ValueError('No-suitable input needs only status, reason and reviewed_by')
+            outcome=reviewed_no_suitable_outcome(policy['video_sha256'],policy['subtitle_sha256'],policy['analysis_params'],
+                                                 candidate_sha,incoming['reason'],incoming['reviewed_by'])
+        elif incoming['status']=='selected_applied':
+            if set(incoming)!={'status','chapter_record_file'} or not isinstance(incoming['chapter_record_file'],str):
+                raise ValueError('Selected input needs only status and chapter_record_file')
+            name=incoming['chapter_record_file']
+            if not re.fullmatch(r'chapters-[0-9a-f]{12}\.json',name):
+                raise ValueError('Chapter record path is invalid')
+            record_path=job/'viewing_breaks'/name
+            if not record_path.is_file(): raise ValueError('Applied viewing-break chapter record is missing')
+            record=read_json(record_path);plan=record.get('reviewed_plan') if isinstance(record,dict) else None
+            if (record.get('status')!='beta_chapters_need_playback_review' or record.get('source_sha256')!=policy['video_sha256']
+                    or not isinstance(plan,dict) or plan.get('source_sha256')!=policy['video_sha256']
+                    or plan.get('review_status')!='reviewed' or not isinstance(plan.get('breaks'),list) or not plan['breaks']):
+                raise ValueError('Applied viewing-break chapter record is stale or incomplete')
+            output_path=Path(record.get('output',''))
+            if (not isinstance(record.get('output_sha256'),str) or not re.fullmatch(r'[0-9a-f]{64}',record['output_sha256'])
+                    or not output_path.is_file() or file_hash(output_path)!=record['output_sha256']):
+                raise ValueError('Applied viewing-break chapter output hash is invalid')
+            outcome={'status':'selected_applied','assessment':'complete','source_sha256':policy['video_sha256'],
+                     'subtitle_sha256':policy['subtitle_sha256'],'analysis_params':policy['analysis_params'],
+                     'candidate_analysis_sha256':candidate_sha,'chapter_record_file':name,
+                     'chapter_record_sha256':file_hash(record_path)}
+        else:
+            raise ValueError('Viewing-break outcome status must be reviewed_no_suitable or selected_applied')
+        write_json(job/'viewing_breaks'/policy['outcome_file'],outcome,overwrite=True)
+        return {'status':outcome['status'],'outcome_path':str(job/'viewing_breaks'/policy['outcome_file'])}
+
+
+def validate_viewing_break_outcome(job, meta):
+    """Require a completed, source-bound decision for new automatic jobs only."""
+    policy=_viewing_policy(job,meta)
+    if policy is None: return None
+    if not policy['enabled']: return {'status':'disabled'}
+    outcome=read_json(Path(job)/'viewing_breaks'/policy['outcome_file'])
+    if policy.get('video_supplied') is False:
+        if (outcome.get('status')!='no_media' or outcome.get('assessment')!='not_assessed'
+                or outcome.get('source_sha256') is not None or outcome.get('subtitle_sha256')!=meta['source_sha256']):
+            raise ValueError('Viewing-break no-media outcome is invalid')
+        return {'status':'no_media','assessment':'not_assessed'}
+    if outcome.get('status')=='pending':
+        raise ValueError('Viewing-break candidate analysis and story review are pending')
+    candidate_path,_=_candidate_analysis(job,policy);candidate_sha=file_hash(candidate_path)
+    if outcome.get('status')=='reviewed_no_suitable':
+        validate_reviewed_no_suitable(outcome,policy['video_sha256'],policy['subtitle_sha256'],policy['analysis_params'])
+        if outcome.get('candidate_analysis_sha256')!=candidate_sha:
+            raise ValueError('Viewing-break no-suitable analysis evidence is stale')
+    elif outcome.get('status')=='selected_applied':
+        name=outcome.get('chapter_record_file')
+        if (outcome.get('assessment')!='complete' or outcome.get('source_sha256')!=policy['video_sha256']
+                or outcome.get('subtitle_sha256')!=policy['subtitle_sha256'] or outcome.get('analysis_params')!=policy['analysis_params']
+                or outcome.get('candidate_analysis_sha256')!=candidate_sha or not isinstance(name,str)
+                or not re.fullmatch(r'chapters-[0-9a-f]{12}\.json',name)):
+            raise ValueError('Viewing-break applied outcome is stale or incomplete')
+        record_path=Path(job)/'viewing_breaks'/name
+        if not record_path.is_file() or outcome.get('chapter_record_sha256')!=file_hash(record_path):
+            raise ValueError('Viewing-break chapter evidence changed')
+        record=read_json(record_path)
+        if record.get('source_sha256')!=policy['video_sha256'] or record.get('status')!='beta_chapters_need_playback_review':
+            raise ValueError('Viewing-break chapter evidence is stale')
+    else:
+        raise ValueError('Viewing-break outcome is incomplete')
+    return {'status':outcome['status'],'assessment':'complete'}
 
 
 def load_job(job):
@@ -163,6 +420,8 @@ def load_job(job):
     source=job/meta['source_name']
     if file_hash(source)!=meta['source_sha256']: raise ValueError('Job source was modified')
     profile=load_profile(job/'profile.json')
+    usage_path=job/'token_usage.json'
+    if usage_path.is_file(): validate_usage_ledger(read_json(usage_path))
     bindings=meta.get('translation_bindings')
     if bindings is not None:
         if not isinstance(bindings,dict) or set(bindings)!={'source_sha256','episode_context_sha256','profile_sha256','series_context_sha256'}:
@@ -349,6 +608,10 @@ def finalize(job,output,review_path=None,archive_root=None):
         actual_review=Path(review_path) if review_path else job/'review.json'
         review=read_json(actual_review)
         validate_review(review,report,learning_report)
+        translation_sha256=object_hash(collect(job,meta))
+        usage=validate_usage_ledger(read_json(job/'token_usage.json'))
+        orchestration=validate_worker_receipts(job,meta,report,review,translation_sha256,usage)
+        viewing_breaks=validate_viewing_break_outcome(job,meta)
         if output.resolve()==Path(meta['source_original']).resolve():
             raise ValueError('Cannot overwrite original source')
         sidecar=output.with_suffix(output.suffix+'.qa.json')
@@ -370,7 +633,10 @@ def finalize(job,output,review_path=None,archive_root=None):
                           'visual_review':'not_verified_by_this_command',
                           'learning_report_sha256':file_hash(learning_report) if learning_report else None,
                           'content_filter_evidence':cut_records,
-                          'viewing_break_evidence':viewing_break_records}
+                          'viewing_break_evidence':viewing_break_records,
+                          'viewing_break_assessment':viewing_breaks}
+                if orchestration is not None:
+                    delivery['orchestration']=orchestration
                 write_json(staged_qa,delivery,overwrite=False)
                 prefs=read_json(ROOT/'resources/preferences.json')
                 archive=archive_delivery(job,staged,staged_qa,Path(archive_root or prefs['archive_root']).expanduser(),review_path=actual_review)
@@ -388,8 +654,14 @@ def finalize(job,output,review_path=None,archive_root=None):
 def status(job):
     meta,source,profile=load_job(job)
     missing=[b['file'] for b in meta['batches'] if not (Path(job)/'translations'/b['file']).is_file()]
+    viewing_policy=_viewing_policy(job,meta)
+    viewing_status=None
+    if viewing_policy and viewing_policy['enabled']:
+        outcome=Path(job)/'viewing_breaks'/viewing_policy['outcome_file']
+        viewing_status=read_json(outcome).get('status') if outcome.is_file() else 'missing'
     return {'batches':len(meta['batches']),'missing_batches':missing,'candidate_exists':(Path(job)/'candidate.ass').exists(),
-            'review_exists':(Path(job)/'review.json').exists(),'note':'Existence is not validation; finalize checks content and hashes.'}
+            'review_exists':(Path(job)/'review.json').exists(),'viewing_break_status':viewing_status,
+            'note':'Existence is not validation; finalize checks content and hashes.'}
 
 
 def handoff(job):
@@ -435,6 +707,7 @@ def handoff(job):
             'review':review,
             'delivery':delivered,
         },
+        'orchestration':compact_summary(job,meta),
         'resume_rule':'Use local job files as continuity. Do not load prior chat, old subtitle dumps, full logs, or prior render images unless a current targeted issue requires them.',
         'note':'File presence is not validation; build/finalize recheck content and hashes.',
     }
@@ -457,6 +730,8 @@ def create_receipt(job,stage):
             'bindings':bindings,'counts':{'batches_total':len(meta['batches']),'batches_valid':0,
             'batches_missing':0,'lines_total':sum(len(b.get('indices',[])) for b in meta['batches']),
             'technical_issues':0},'artifact_sha256':None,'next_action':'inspect_worker_artifacts','error_code':None}
+    result['token_usage']=summarize_usage_ledger(read_json(job/'token_usage.json') if (job/'token_usage.json').is_file() else None)
+    result['orchestration']=compact_summary(job,meta)
     try:
         validate_context(read_json(job/'context.json'))
         if stage=='context':
@@ -486,6 +761,8 @@ def create_receipt(job,stage):
             if read_json(job/'technical_report.json')!=report: raise ValueError('Technical report is stale')
             learning=validate_learning_report(job,read_json(job/'context.json'),loaded_source)
             review_path=job/'review.json';review=read_json(review_path);validate_review(review,report,learning)
+            validate_worker_receipts(job,meta,report,review,object_hash(collect(job,meta)),
+                                     validate_usage_ledger(read_json(job/'token_usage.json')))
             result['counts'].update(batches_valid=len(meta['batches']),technical_issues=sum(len(r['issues']) for r in report['lines']))
             result.update(status='complete',artifact_sha256=file_hash(review_path),next_action='finalize')
         else:
@@ -505,19 +782,73 @@ def create_receipt(job,stage):
     return {'receipt_path':str(path),'receipt_sha256':file_hash(path),'stage':stage,'status':result['status']}
 
 
+def record_worker_run(job, input_path, review_path=None):
+    """Record one role's bounded, artifact-bound attestation for a strict job.
+
+    The JSON input deliberately records platform observations as observations;
+    the command validates local artifact hashes but cannot authenticate a remote
+    worker or model identity.
+    """
+    job=Path(job).resolve();ensure_mutable_job(job)
+    incoming=validate_run_input(read_json(input_path))
+    with job_lock(job):
+        meta,source,profile=load_job(job)
+        plan=load_plan(job,meta)
+        if plan is None:
+            raise ValueError('record-worker-run is only needed for new strict orchestration jobs')
+        if incoming['capability'] is not None:
+            plan=update_capability(plan,incoming['capability'],incoming['fallback_reason'])
+            write_json(job/'orchestration.json',plan)
+        role_name=incoming['role']
+        if role_name=='translator':
+            bindings={'source_sha256':meta['source_sha256'],'translation_sha256':object_hash(collect(job,meta))}
+            review_mode=None
+        else:
+            subs,report,loaded_meta,loaded_source=evaluate(job)
+            candidate=job/'candidate.ass'
+            import hashlib
+            expected=hashlib.sha256(subs.to_string('ass').encode()).hexdigest()
+            if not candidate.is_file() or file_hash(candidate)!=expected:
+                raise ValueError('Reviewer receipt needs a current candidate')
+            report['candidate_sha256']=expected
+            if read_json(job/'technical_report.json')!=report:
+                raise ValueError('Reviewer receipt needs a current technical report')
+            learning=validate_learning_report(job,read_json(job/'context.json'),loaded_source)
+            actual_review=Path(review_path) if review_path else job/'review.json'
+            review=read_json(actual_review);validate_review(review,report,learning)
+            if incoming['worker_id'].strip()!=review['reviewer']:
+                raise ValueError('Reviewer receipt worker identifier must match review.json')
+            bindings={'source_sha256':meta['source_sha256'],'input_sha256':report['input_sha256'],
+                      'candidate_sha256':report['candidate_sha256'],'review_sha256':object_hash(review)}
+            review_mode=review['mode']
+        receipt=write_worker_receipt(job,role_name,incoming['worker_id'],incoming['provenance'],incoming['runtime'],
+                                     bindings,review_mode=review_mode,fallback_reason=incoming['fallback_reason'])
+        path=job/'worker_receipts'/(role_name+'.json')
+        return {'role':role_name,'receipt_path':str(path),'receipt_sha256':file_hash(path),
+                'provenance_kind':receipt['provenance']['kind'],'runtime_model_status':receipt['runtime']['model_status'],
+                'runtime_effort_status':receipt['runtime']['effort_status']}
+
+
 def resume_from_archive(archive,new_job):
     archive,new_job=Path(archive).resolve(),Path(new_job).resolve()
     if new_job.exists(): raise ValueError('New job destination already exists')
     ensure_plain_tree(archive)
     manifest=verify_existing_bundle(archive,read_json(archive/'archive-manifest.json'))
-    keep={'job.json','context.json','profile.json','series_context.json','series_update.json','learning_report.json','timing_windows.json'}
-    selected=[i['name'] for i in manifest['files'] if i['name'] in keep or i['name'].startswith('source.') or i['name'].startswith('requests/') or i['name'].startswith('translations/') or i['name'].startswith('content_filter/') or i['name'].startswith('viewing_breaks/')]
+    keep={'job.json','context.json','profile.json','series_context.json','series_update.json','learning_report.json','timing_windows.json','token_usage.json','orchestration.json'}
+    selected=[i['name'] for i in manifest['files'] if i['name'] in keep or i['name'].startswith('source.') or i['name'].startswith('requests/') or i['name'].startswith('translations/') or i['name'].startswith('content_filter/') or i['name'].startswith('viewing_breaks/') or i['name'].startswith('artifacts/') or i['name'].startswith('worker_receipts/')]
     new_job.parent.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(dir=new_job.parent) as staging:
         tmp=Path(staging)/'job'; tmp.mkdir()
         for name in selected:
             target=tmp/name; target.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(archive/name,target)
         meta=read_json(tmp/'job.json'); meta['resumed_from_archive']=str(archive); meta['engine_version']=VERSION
+        if meta.get('orchestration_required')==STRICT_MARKER_VERSION:
+            # A resumed job is a new mutable attempt.  Immutable archive
+            # receipts remain in the source archive; they cannot attest edits
+            # made after resumption or satisfy the new attempt's usage gate.
+            write_json(tmp/'orchestration.json',blank_orchestration_plan())
+            write_json(tmp/'token_usage.json',blank_usage_ledger())
+            shutil.rmtree(tmp/'worker_receipts',ignore_errors=True)
         write_json(tmp/'job.json',meta)
         publish_directory(tmp,new_job)
     return {'status':'resumed','job':str(new_job),'source_archive':str(archive),'copied_files':len(selected)}
@@ -526,19 +857,30 @@ def resume_from_archive(archive,new_job):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     cmd=p.add_subparsers(dest='command',required=True)
-    q=cmd.add_parser('prepare'); q.add_argument('--input',required=True); q.add_argument('--job',required=True); q.add_argument('--profile'); q.add_argument('--context'); q.add_argument('--series-context'); q.add_argument('--episode-id')
+    q=cmd.add_parser('prepare'); q.add_argument('--input',required=True); q.add_argument('--job',required=True); q.add_argument('--profile'); q.add_argument('--context'); q.add_argument('--series-context'); q.add_argument('--episode-id'); q.add_argument('--video')
     for name in ('build','status','handoff','finalize'):
         q=cmd.add_parser(name); q.add_argument('--job',required=True)
         if name=='finalize': q.add_argument('--output',required=True); q.add_argument('--review'); q.add_argument('--archive-root')
     q=cmd.add_parser('receipt');q.add_argument('--job',required=True);q.add_argument('--stage',required=True,choices=('context','translation','review','delivery'))
+    q=cmd.add_parser('record-token-usage');q.add_argument('--job',required=True);q.add_argument('--input',required=True)
+    q=cmd.add_parser('record-worker-run');q.add_argument('--job',required=True);q.add_argument('--input',required=True);q.add_argument('--review')
+    q=cmd.add_parser('import-translations');q.add_argument('--job',required=True);q.add_argument('--batch',required=True);q.add_argument('--input',required=True)
+    q=cmd.add_parser('analyze-viewing-breaks');q.add_argument('--job',required=True)
+    q=cmd.add_parser('record-viewing-break-outcome');q.add_argument('--job',required=True);q.add_argument('--input',required=True)
     q=cmd.add_parser('resume-from-archive'); q.add_argument('--archive',required=True); q.add_argument('--job',required=True)
     a=p.parse_args()
     try:
-        if a.command=='prepare': result=prepare(a.input,a.job,a.profile,a.context,a.series_context,a.episode_id)
+        if a.command=='prepare': result=prepare(a.input,a.job,a.profile,a.context,a.series_context,a.episode_id,a.video)
         elif a.command=='build': result=build(a.job)
         elif a.command=='status': result=status(a.job)
         elif a.command=='handoff': result=handoff(a.job)
         elif a.command=='receipt': result=create_receipt(a.job,a.stage)
+        elif a.command=='record-token-usage':
+            ensure_mutable_job(a.job); usage=validate_usage_ledger(read_json(a.input)); write_json(Path(a.job)/'token_usage.json',usage); result=summarize_usage_ledger(usage)
+        elif a.command=='record-worker-run': result=record_worker_run(a.job,a.input,a.review)
+        elif a.command=='import-translations': result=import_plain_translations(a.job,a.batch,a.input)
+        elif a.command=='analyze-viewing-breaks': result=analyze_viewing_breaks(a.job)
+        elif a.command=='record-viewing-break-outcome': result=record_viewing_break_outcome(a.job,a.input)
         elif a.command=='finalize': result=finalize(a.job,a.output,a.review,a.archive_root)
         else: result=resume_from_archive(a.archive,a.job)
         print(json.dumps(result,ensure_ascii=False,indent=2))

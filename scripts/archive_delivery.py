@@ -72,12 +72,21 @@ def archive_delivery(job_path, output_path, qa_path, archive_root, review_path=N
     for folder in ('requests','translations'):
         for p in sorted((job/folder).glob('batch-*.json')):
             files.append((f'{folder}/{p.name}',p))
-    for optional in ('series_context.json','series_update.json','learning_report.json','timing_windows.json'):
+    for optional in ('series_context.json','series_update.json','learning_report.json','timing_windows.json','token_usage.json','orchestration.json'):
         p=job/optional
         if p.is_file(): files.append((optional,p))
-    for folder in ('content_filter','viewing_breaks','receipts'):
+    for folder in ('content_filter','viewing_breaks','receipts','worker_receipts'):
         for p in sorted((job/folder).glob('*.json')):
             files.append((f'{folder}/{p.name}',p))
+    # Deliberately staged workflow outputs (reports, images, audio, or later generated media) are preserved too.
+    artifacts=job/'artifacts'
+    if artifacts.exists():
+        if not artifacts.is_dir(): raise ValueError('Job artifacts path must be a directory')
+        for p in sorted(artifacts.rglob('*')):
+            if not p.is_file(): continue
+            relative=p.relative_to(job).as_posix()
+            if Path(relative).name=='archive-manifest.json': raise ValueError('Reserved archive manifest name in artifacts')
+            files.append((relative,p))
     manifest={'status':'archived','immutable':True,'title':title,'bundle':str(destination.resolve()),'files':[]}
     parent.mkdir(parents=True,exist_ok=True)
     if destination.exists():

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "series_id": "",
+  "season_id": "S01",
+  "title": "",
+  "media_type": "anime",
+  "source_language": "",
+  "target_language": "tr",
+  "original_audio_language": "",
+  "original_audio_status": "unknown",
+  "original_audio_evidence": "",
+  "episode_sources": [],
+  "characters": {},
+  "relationships": [],
+  "voices": {},
+  "glossary": {},
+  "recurring_elements": [],
+  "episode_notes": {},
+  "guardrails": [],
+  "uncertainties": [],
+  "content_filter_candidates": []
+}
