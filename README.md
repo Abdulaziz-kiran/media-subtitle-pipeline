@@ -64,7 +64,7 @@ Source Media (.mkv / .mp4 / .ass)
 
 ## 🧪 Verification & Test Suite
 
-The pipeline is verified by a suite of **135 unit and integration tests**, challenging boundaries including:
+The pipeline is verified by a comprehensive suite of **159 unit and integration tests**, challenging boundaries including:
 - Malformed subtitle strings and injection attacks
 - Karaoke tag resets and multi-part line preservation
 - Stale review detection upon source or context modification

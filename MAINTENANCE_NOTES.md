@@ -94,6 +94,14 @@ Bu zaten doğru davranış ve belgeli. Not olarak burada: `resume-from-archive` 
 
 `SKILL.md` satır 41-47'de tanımlanan bağımsız `provenance.json` (Çeviri Üretim Pasaportu ve Geriye Dönük Analiz Kaydı), mevcut `scripts/archive_delivery.py` tarafından bağımsız bir dosya olarak henüz otomatik üretilmemekte veya zorunlu tutulmamaktadır. İlgili telemetri ve doğrulama verileri şu an `technical_report.json`, `worker_receipts/*.json`, `orchestration.json` ve `token_usage.json` içinde dağıtık bulunmaktadır. Bu durum 2.4.1 revizyonu öncesinden gelen tarihsel bir dokümantasyon/motor tutarsızlığıdır; bir sonraki sürümde ya deterministik bir `generate_provenance` adımı eklenmeli ya da doküman makbuz mimarisine uyarlanmalıdır.
 
+### G. Kamusal ürün vizyonu, kitlesel kullanım ve pazarlama hazırlığı (2026-09-16)
+
+Kullanıcı stratejik kararıyla `media-subtitle-pipeline` projesi kişisel araç statüsünden çıkarılıp herkesin kullanımına uygun, kamuya açık ve geniş kitlelere ulaştırılacak bir ürün/araç vizyonuna geçirilmiştir. 2.4.2 ve sonraki sürümlerde geliştirme ve mimari kararlar şu ilkelerle yönlendirilecektir:
+1. **Kullanıcı Deneyimi (UX) & Kurulum Kolaylığı:** Tek komutla hazırlık/çeviri/mux akışı (`one-command season UX`), sıfır konfigürasyonla başlama imkanı ve harici bağımlılıkların kolay yönetimi.
+2. **Platform Bağımsızlığı & Hata Toleransı:** macOS/Linux yanı sıra geniş platform uyumluluğu, harici araçların (FFmpeg, libass, yerel fontlar) varlık/yokluk durumunda kullanıcı dostu yönlendirmeler.
+3. **Pazarlama & Topluluk:** Açık kaynak kılavuzları, örnek çeviri çıktıları, vitrin tanıtımları ve kitlelere erişim materyalleri.
+
+
 
 ---
 
